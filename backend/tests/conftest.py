@@ -4,6 +4,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
 from app.db import Base, get_db
+from app.incidents import make_incident_evaluator
 from app.main import app
 from app.scheduler.engine import Scheduler
 
@@ -47,7 +48,7 @@ async def client():
     # Не запускаем настоящий app-lifespan (он поднял бы планировщик на проде,
     # ASGITransport и не вызывает lifespan сам по себе) — вместо этого явно
     # ставим планировщик, привязанный к тестовой БД, в app.state.
-    scheduler = Scheduler(TestSessionLocal)
+    scheduler = Scheduler(TestSessionLocal, on_result=make_incident_evaluator(TestSessionLocal))
     app.state.scheduler = scheduler
     await scheduler.start()
     try:

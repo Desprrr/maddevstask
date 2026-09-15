@@ -7,6 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api import checks, groups
 from app.config import get_settings
 from app.db import async_session_factory
+from app.incidents import make_incident_evaluator
 from app.scheduler.engine import Scheduler
 
 settings = get_settings()
@@ -14,7 +15,7 @@ settings = get_settings()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    scheduler = Scheduler(async_session_factory)
+    scheduler = Scheduler(async_session_factory, on_result=make_incident_evaluator(async_session_factory))
     app.state.scheduler = scheduler
     await scheduler.start()
     try:
