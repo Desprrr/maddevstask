@@ -146,6 +146,12 @@ function statusKind(check: Check): 'up' | 'down' | 'paused' {
   return status?.is_down ? 'down' : 'up'
 }
 
+/** Общий статус группы: "down", если упал хотя бы один её чек (пауза не
+ * считается падением) — то же правило, что и на публичной странице. */
+function groupStatus(checks: Check[]): 'up' | 'down' {
+  return checks.some((c) => statusKind(c) === 'down') ? 'down' : 'up'
+}
+
 function liveDowntime(check: Check): number | null {
   const status = checksStore.statuses[check.id]
   if (!status?.current_incident_started_at) return null
@@ -217,7 +223,10 @@ function liveDowntime(check: Check): number | null {
     <p v-if="checksStore.error" class="error">{{ checksStore.error }}</p>
 
     <section v-for="section in sections" :key="section.groupId ?? 'none'" class="card">
-      <h2>{{ section.name }}</h2>
+      <div class="card-header">
+        <h2>{{ section.name }}</h2>
+        <StatusBadge v-if="section.checks.length" :status="groupStatus(section.checks)" />
+      </div>
       <div v-if="section.checks.length" class="table-wrap">
       <table>
         <thead>
@@ -279,6 +288,14 @@ function liveDowntime(check: Check): number | null {
 .card h2 {
   margin: 0 0 0.75rem;
   font-size: 1.05rem;
+}
+.card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.card-header h2 {
+  margin: 0;
 }
 .inline-form,
 .check-form {

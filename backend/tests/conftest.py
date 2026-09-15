@@ -9,6 +9,7 @@ from app.db import Base, get_db
 from app.main import app, make_on_result
 from app.realtime.connection_manager import ConnectionManager
 from app.scheduler.engine import Scheduler
+from app.scheduler.prober import close_shared_client
 
 TEST_DATABASE_URL = "postgresql+asyncpg://monitor:monitor@localhost:5432/monitor_test"
 
@@ -68,3 +69,7 @@ async def client():
     finally:
         await dispatcher.shutdown()
         await scheduler.shutdown()
+        # prober._client — общий httpx.AsyncClient на весь процесс, а у
+        # pytest-asyncio каждый тест может получить свой event loop; не
+        # сбросить — поймать тот же межloop'овый краш, что и с БД-пулом.
+        await close_shared_client()

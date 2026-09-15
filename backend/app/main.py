@@ -15,6 +15,7 @@ from app.models.check import Check
 from app.models.check_result import CheckResult
 from app.realtime.connection_manager import ConnectionManager
 from app.scheduler.engine import Scheduler
+from app.scheduler.prober import close_shared_client
 
 settings = get_settings()
 
@@ -53,6 +54,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     finally:
         await dispatcher.shutdown()
         await scheduler.shutdown()
+        await close_shared_client()
 
 
 app = FastAPI(title="Site Availability Monitor", lifespan=lifespan)
