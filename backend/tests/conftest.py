@@ -3,6 +3,8 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
+from app.alerting.dispatcher import AlertDispatcher
+from app.alerting.email_sender import FakeEmailSender
 from app.db import Base, get_db
 from app.incidents import make_incident_evaluator
 from app.main import app
@@ -51,9 +53,15 @@ async def client():
     scheduler = Scheduler(TestSessionLocal, on_result=make_incident_evaluator(TestSessionLocal))
     app.state.scheduler = scheduler
     await scheduler.start()
+
+    dispatcher = AlertDispatcher(TestSessionLocal, FakeEmailSender(TestSessionLocal))
+    app.state.alert_dispatcher = dispatcher
+    dispatcher.start()
+
     try:
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as ac:
             yield ac
     finally:
+        await dispatcher.shutdown()
         await scheduler.shutdown()

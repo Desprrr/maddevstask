@@ -4,7 +4,9 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import checks, groups
+from app.alerting.dispatcher import AlertDispatcher
+from app.alerting.email_sender import make_email_sender
+from app.api import checks, groups, maintenance_windows
 from app.config import get_settings
 from app.db import async_session_factory
 from app.incidents import make_incident_evaluator
@@ -18,9 +20,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     scheduler = Scheduler(async_session_factory, on_result=make_incident_evaluator(async_session_factory))
     app.state.scheduler = scheduler
     await scheduler.start()
+
+    email_sender = make_email_sender(settings, async_session_factory)
+    dispatcher = AlertDispatcher(async_session_factory, email_sender)
+    app.state.alert_dispatcher = dispatcher
+    dispatcher.start()
+
     try:
         yield
     finally:
+        await dispatcher.shutdown()
         await scheduler.shutdown()
 
 
@@ -36,6 +45,7 @@ app.add_middleware(
 
 app.include_router(groups.router, prefix="/api")
 app.include_router(checks.router, prefix="/api")
+app.include_router(maintenance_windows.router, prefix="/api")
 
 
 @app.get("/health")
