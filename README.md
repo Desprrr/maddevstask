@@ -5,6 +5,8 @@
 инциденты, шлёт оповещения на почту и показывает живую панель статусов и публичную страницу
 статуса — без перезагрузки страницы, для нескольких одновременно открытых клиентов.
 
+[![CI](https://github.com/Desprrr/maddevstask/actions/workflows/ci.yml/badge.svg)](https://github.com/Desprrr/maddevstask/actions/workflows/ci.yml)
+
 ## Стек и почему так
 
 - **Backend: Python + FastAPI (asyncio).** Планировщик проверок — по сути I/O-bound задача
@@ -24,14 +26,91 @@
   остальные решения по ходу разработки — в [`DECISIONS.md`](./DECISIONS.md), с таймштампами от
   самого начала работы до этой строки.
 
+## Архитектура
+
+### Поток данных: от пробы до письма и живого обновления
+
+```
+Scheduler (один asyncio.Task на активный чек)
+   │  next run = момент завершения предыдущего + interval_seconds
+   │  (никогда не запускает пробу параллельно самой себе)
+   ▼
+prober.probe(check)  ── общий httpx.AsyncClient на процесс ──▶ проверяемый сайт
+   │
+   ▼
+CheckResult записан в БД
+   │
+   ├──▶ ConnectionManager.broadcast_check_result()  ──▶ /ws/admin (всегда)
+   │                                                 └─▶ /ws/public (если check.is_public)
+   │
+   ▼
+incidents.evaluate(check, result)   — 2 подряд неудачи открывают инцидент, первый успех закрывает;
+   │                                   решение всегда берётся из БД, не из памяти (restart-safe)
+   ▼
+IncidentEvent (opened/closed) ──▶ ConnectionManager.broadcast_incident_event() ──▶ /ws/admin, /ws/public
+                                                        │
+                                                        ▼
+                                    AlertDispatcher (отдельный цикл, раз в 20с)
+                                    сканирует несквитанные инциденты, проверяет окна
+                                    обслуживания, шлёт письмо через EmailSender
+```
+
+CRUD-действия (создать/удалить/поставить на паузу чек или группу, окно обслуживания) идут
+отдельным путём: после мутации в БД рассылается лёгкий сигнал
+`ConnectionManager.broadcast_admin_changed()` (`{"type": "admin.changed"}`) на `/ws/admin` — фронтенд в ответ
+просто перезапрашивает списки, поэтому все открытые вкладки админки видят одно и то же не
+только по статусам, но и по составу чеков/групп.
+
+### Backend (`backend/app/`)
+
+| Модуль | Отвечает за |
+|---|---|
+| `models/` | SQLAlchemy ORM: `Group`, `GroupAlertEmail`, `Check`, `CheckResult`, `Incident`, `MaintenanceWindow`, `SentEmail` |
+| `schemas/` | Pydantic-модели запросов/ответов API |
+| `api/checks.py` | CRUD чеков, pause/resume/run-now, `/status` (панель), `/history` (агрегация), `/incidents` (журнал) |
+| `api/groups.py` | CRUD групп и их адресов оповещений |
+| `api/maintenance_windows.py` | CRUD окон обслуживания |
+| `api/public.py` | `GET /public/status` — курированный снапшот для публичной страницы |
+| `api/ws.py` | WebSocket-эндпоинты `/ws/admin`, `/ws/public` |
+| `scheduler/engine.py` | `Scheduler` — по одной asyncio-задаче на активный чек, `run-now`, гарантия отсутствия параллельного запуска самого себя |
+| `scheduler/prober.py` | Одна HTTP-проба; общий `httpx.AsyncClient` на процесс (пул соединений — важно под нагрузку многих чеков) |
+| `incidents.py` | Открытие/закрытие инцидентов по порогу подряд-неудач; вся история берётся из БД, ничего не хранит в памяти |
+| `alerting/email_sender.py` | Абстракция `EmailSender`: `FakeEmailSender` (только outbox в БД) / `SmtpEmailSender` (реальный SMTP) |
+| `alerting/dispatcher.py` | Периодический sweep: кому ещё не отправлено письмо, не идёт ли сейчас окно обслуживания |
+| `realtime/connection_manager.py` | Пулы WS-подключений admin/public, рассылка событий |
+| `db.py`, `config.py` | Async engine/session factory, настройки из окружения |
+| `seed.py` | Идемпотентные демо-данные на `target-emulator` |
+| `alembic/` | Миграции схемы БД |
+
+### Frontend (`frontend/src/`)
+
+| Модуль | Отвечает за |
+|---|---|
+| `api/http.ts` | Типизированный REST-клиент (относительные пути `/api/...`) |
+| `api/ws.ts` | WebSocket-клиент с автопереподключением (экспоненциальный backoff) |
+| `stores/checks.ts`, `stores/groups.ts` | Pinia: состояние + применение live-событий с сервера |
+| `views/DashboardView.vue` | Админка: CRUD групп/чеков, живая панель статусов |
+| `views/CheckDetailView.vue` | График истории, журнал инцидентов, окна обслуживания чека |
+| `views/PublicStatusView.vue` | Публичная страница статуса (без входа) |
+| `composables/useNow.ts` | Тикающие "часы" для живого отображения длительности падения |
+
+### Хранилище
+
+7 таблиц (см. `backend/alembic/versions/` для точной схемы): `groups` + `group_alert_emails`
+(группы и адреса оповещений), `checks` (сами проверки), `check_results` (сырая история проб,
+индекс `(check_id, checked_at)` под быструю агрегацию), `incidents` (журнал падений),
+`maintenance_windows` (окна обслуживания на чек или группу), `sent_emails` (outbox — доказательство
+отправки писем независимо от backend'а).
+
 ## Структура репозитория
 
 ```
-backend/            FastAPI backend (app/, alembic/, tests/)
-target-emulator/    сервис-эмулятор проверяемых сайтов (входит в задание)
-frontend/           Vue 3 + TS фронтенд
-docker-compose.yml  postgres + mailpit + backend + target-emulator + frontend
-DECISIONS.md        лог решений с таймштампами — как и почему устроено именно так
+backend/                   FastAPI backend (app/, alembic/, tests/)
+target-emulator/           сервис-эмулятор проверяемых сайтов (входит в задание)
+frontend/                  Vue 3 + TS фронтенд
+.github/workflows/ci.yml   CI: тесты backend/target-emulator, сборка frontend, сборка и e2e-прогон docker-compose
+docker-compose.yml         postgres + mailpit + backend + target-emulator + frontend
+DECISIONS.md               лог решений с таймштампами — как и почему устроено именно так
 ```
 
 ## Запуск
@@ -130,6 +209,45 @@ pytest -q
 не покрыть юнит-тестами: реальный HTTP end-to-end, два одновременно открытых клиента, реальная
 доставка писем по SMTP в docker-compose.
 
+## Деплой на свой сервер
+
+Минимальный вариант — тот же `docker-compose.yml`, что и для локального запуска, на любом
+сервере с Docker (VPS, облачная VM и т.п.). Собственно приложение не завязано на localhost —
+все внутренние обращения идут по именам docker-сервисов (`postgres`, `backend`,
+`target-emulator`), поэтому специфичного для локальной машины в стеке нет. Для реального
+сервера стоит поменять несколько вещей:
+
+1. **Секреты и пароли.** `POSTGRES_PASSWORD`/`DATABASE_URL` в `docker-compose.yml` сейчас —
+   `monitor`/`monitor`, это годится только для локальной разработки. Смените на сгенерированный
+   пароль (и не коммитьте его — вынесите в `.env`, который `docker-compose.yml` может читать
+   через `env_file:`, или в секреты CI/хостинга).
+2. **Почта.** Mailpit — заглушка, письма из неё никуда за пределы сервера не уходят. Для
+   реальной отправки замените `SMTP_HOST`/`SMTP_PORT`/`SMTP_FROM` у сервиса `backend` на
+   настоящий SMTP-relay (например, стороннего провайдера транзакционной почты) — `EMAIL_BACKEND`
+   уже `smtp`, менять код не придётся, только переменные окружения.
+3. **CORS и адрес фронтенда.** `CORS_ORIGINS` у backend сейчас `["http://localhost:8080"]` —
+   поменяйте на реальный домен. Если фронтенд и backend будут на одном домене через nginx
+   (как в `frontend/nginx.conf`), CORS вообще не понадобится — оставьте как есть или сузьте.
+4. **Реверс-прокси и TLS.** Порт 8080 (frontend/nginx) — единственное, что имеет смысл выставлять
+   наружу напрямую. Поставьте перед ним nginx/Caddy/Traefik с настоящим сертификатом (Let's
+   Encrypt) и проксируйте на `127.0.0.1:8080` контейнера. Порты Postgres (5432), Mailpit SMTP
+   (1025) и backend API напрямую (8000) наружу лучше не пробрасывать вовсе — в
+   `docker-compose.yml` они открыты на `0.0.0.0` только ради удобства локальной разработки и
+   отладки; на реальном сервере строки `ports:` для `postgres`/`backend` можно убрать совсем
+   (сервисы всё равно доступны друг другу по внутренней docker-сети без публикации портов).
+5. **Бэкапы.** Все данные — в именованном volume `pgdata`. Регулярный `pg_dump` из контейнера
+   `postgres` (`docker compose exec postgres pg_dump -U monitor monitor > backup.sql`) — самый
+   простой вариант для объёма этого проекта.
+
+Дальше — то же самое, что и локально:
+
+```bash
+git clone https://github.com/Desprrr/maddevstask.git
+cd maddevstask
+# поправить пароли/SMTP/CORS в docker-compose.yml или через .env, см. пункты выше
+docker compose up --build -d
+```
+
 ## Что работает
 
 - Проверки: создание, пауза/возобновление, ручной запуск, удаление; интервал 30с–1ч, таймаут,
@@ -153,6 +271,11 @@ pytest -q
 - Переживает перезапуск сервера: данные в Postgres, открытые инциденты и настройки не теряются;
   пропуски в данных за время простоя — это пробел в истории, а не засчитанное падение.
 - `docker compose up --build` — весь стек одной командой, проверено вживую от начала до конца.
+- 50 одновременных проверок не мешают друг другу и не тормозят интерфейс (нагрузочный скрипт,
+  не только архитектурный расчёт — см. `DECISIONS.md`); история за месяц (86400 строк на один
+  чек) агрегируется на лету за ~0.25с end-to-end.
+- CI (`.github/workflows/ci.yml`): тесты backend и target-emulator, сборка frontend, полная
+  сборка и e2e-прогон `docker compose` на каждый push/PR в `main`.
 
 ## Что не делали и почему (честно)
 

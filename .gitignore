@@ -22,5 +22,8 @@ frontend/.vite/
 .DS_Store
 Thumbs.db
 
+# Claude Code harness-local state (not project content)
+.claude/*.lock
+
 # Logs
 *.log
