@@ -4,7 +4,7 @@ pytestmark = pytest.mark.asyncio
 
 
 async def test_create_check_minimal(client) -> None:
-    response = await client.post("/api/checks", json={"name": "Example", "url": "http://example.com"})
+    response = await client.post("/api/checks", json={"name": "Example", "url": "http://127.0.0.1:9"})
     assert response.status_code == 201
     body = response.json()
     assert body["name"] == "Example"
@@ -15,21 +15,21 @@ async def test_create_check_minimal(client) -> None:
 
 async def test_create_check_with_unknown_group_404(client) -> None:
     response = await client.post(
-        "/api/checks", json={"name": "Example", "url": "http://example.com", "group_id": 999999}
+        "/api/checks", json={"name": "Example", "url": "http://127.0.0.1:9", "group_id": 999999}
     )
     assert response.status_code == 404
 
 
 async def test_create_check_interval_out_of_range_rejected(client) -> None:
     response = await client.post(
-        "/api/checks", json={"name": "Example", "url": "http://example.com", "interval_seconds": 10}
+        "/api/checks", json={"name": "Example", "url": "http://127.0.0.1:9", "interval_seconds": 10}
     )
     assert response.status_code == 422
 
 
 async def test_update_check_partial(client) -> None:
     created = (
-        await client.post("/api/checks", json={"name": "Example", "url": "http://example.com"})
+        await client.post("/api/checks", json={"name": "Example", "url": "http://127.0.0.1:9"})
     ).json()
 
     updated = await client.patch(f"/api/checks/{created['id']}", json={"timeout_ms": 9000})
@@ -41,7 +41,7 @@ async def test_update_check_partial(client) -> None:
 
 async def test_pause_and_resume_check(client) -> None:
     created = (
-        await client.post("/api/checks", json={"name": "Example", "url": "http://example.com"})
+        await client.post("/api/checks", json={"name": "Example", "url": "http://127.0.0.1:9"})
     ).json()
     check_id = created["id"]
 
@@ -54,7 +54,7 @@ async def test_pause_and_resume_check(client) -> None:
 
 async def test_delete_check(client) -> None:
     created = (
-        await client.post("/api/checks", json={"name": "Example", "url": "http://example.com"})
+        await client.post("/api/checks", json={"name": "Example", "url": "http://127.0.0.1:9"})
     ).json()
 
     delete_response = await client.delete(f"/api/checks/{created['id']}")
@@ -67,9 +67,9 @@ async def test_delete_check(client) -> None:
 async def test_list_checks_filtered_by_group(client) -> None:
     group = (await client.post("/api/groups", json={"name": "G1"})).json()
     await client.post(
-        "/api/checks", json={"name": "grouped", "url": "http://example.com", "group_id": group["id"]}
+        "/api/checks", json={"name": "grouped", "url": "http://127.0.0.1:9", "group_id": group["id"]}
     )
-    await client.post("/api/checks", json={"name": "ungrouped", "url": "http://example.com"})
+    await client.post("/api/checks", json={"name": "ungrouped", "url": "http://127.0.0.1:9"})
 
     response = await client.get("/api/checks", params={"group_id": group["id"]})
     assert response.status_code == 200

@@ -5,6 +5,7 @@ from sqlalchemy.pool import NullPool
 
 from app.db import Base, get_db
 from app.main import app
+from app.scheduler.engine import Scheduler
 
 TEST_DATABASE_URL = "postgresql+asyncpg://monitor:monitor@localhost:5432/monitor_test"
 
@@ -43,6 +44,15 @@ async def _clean_tables():
 
 @pytest_asyncio.fixture
 async def client():
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as ac:
-        yield ac
+    # Не запускаем настоящий app-lifespan (он поднял бы планировщик на проде,
+    # ASGITransport и не вызывает lifespan сам по себе) — вместо этого явно
+    # ставим планировщик, привязанный к тестовой БД, в app.state.
+    scheduler = Scheduler(TestSessionLocal)
+    app.state.scheduler = scheduler
+    await scheduler.start()
+    try:
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            yield ac
+    finally:
+        await scheduler.shutdown()

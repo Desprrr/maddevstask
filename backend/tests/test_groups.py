@@ -54,7 +54,7 @@ async def test_delete_group_ungroups_its_checks(client) -> None:
     check = (
         await client.post(
             "/api/checks",
-            json={"name": "site", "url": "http://example.com", "group_id": group["id"]},
+            json={"name": "site", "url": "http://127.0.0.1:9", "group_id": group["id"]},
         )
     ).json()
 

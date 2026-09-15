@@ -27,6 +27,18 @@ class CheckUpdate(BaseModel):
     is_public: bool | None = None
 
 
+class CheckResultOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    check_id: int
+    checked_at: dt.datetime
+    success: bool
+    response_time_ms: int | None
+    status_code: int | None
+    error: str | None
+
+
 class CheckOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
