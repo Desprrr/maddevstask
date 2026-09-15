@@ -7,6 +7,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     database_url: str = "postgresql+asyncpg://monitor:monitor@localhost:5432/monitor"
+    database_ssl: bool = False
 
     email_backend: str = "fake"  # "fake" | "smtp"
     smtp_host: str = "localhost"
