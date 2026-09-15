@@ -1,12 +1,26 @@
+import datetime as dt
+from typing import Literal
+
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select
+from sqlalchemy import Integer, cast, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_scheduler
 from app.db import get_db
 from app.models.check import Check
+from app.models.check_result import CheckResult
 from app.models.group import Group
-from app.schemas.check import CheckCreate, CheckOut, CheckResultOut, CheckUpdate
+from app.models.incident import Incident
+from app.schemas.check import (
+    CheckCreate,
+    CheckHistoryOut,
+    CheckOut,
+    CheckResultOut,
+    CheckStatusOut,
+    CheckUpdate,
+    HistoryPoint,
+)
+from app.schemas.incident import IncidentOut
 from app.scheduler.engine import Scheduler
 
 router = APIRouter(prefix="/checks", tags=["checks"])
@@ -52,9 +66,144 @@ async def list_checks(group_id: int | None = None, db: AsyncSession = Depends(ge
     return list(result.scalars().all())
 
 
+# ВАЖНО: этот литеральный путь должен быть зарегистрирован раньше
+# "/{check_id}" ниже, иначе Starlette сначала попытается сматчить "/status"
+# как check_id (и упадёт в 422 вместо вызова этого хендлера) — порядок
+# роутов имеет значение при совпадении формы пути.
+@router.get("/status", response_model=list[CheckStatusOut])
+async def list_checks_status(db: AsyncSession = Depends(get_db)) -> list[CheckStatusOut]:
+    checks = list((await db.execute(select(Check))).scalars().all())
+    check_ids = [c.id for c in checks]
+    if not check_ids:
+        return []
+
+    # DISTINCT ON — постгресовая фича, но проект и так рассчитан на Postgres.
+    latest_stmt = (
+        select(CheckResult)
+        .where(CheckResult.check_id.in_(check_ids))
+        .distinct(CheckResult.check_id)
+        .order_by(CheckResult.check_id, CheckResult.checked_at.desc(), CheckResult.id.desc())
+    )
+    latest_by_check = {r.check_id: r for r in (await db.execute(latest_stmt)).scalars().all()}
+
+    open_incidents_stmt = select(Incident).where(
+        Incident.check_id.in_(check_ids), Incident.ended_at.is_(None)
+    )
+    open_by_check = {i.check_id: i for i in (await db.execute(open_incidents_stmt)).scalars().all()}
+
+    now = dt.datetime.now(dt.timezone.utc)
+    out: list[CheckStatusOut] = []
+    for check in checks:
+        latest = latest_by_check.get(check.id)
+        incident = open_by_check.get(check.id)
+        out.append(
+            CheckStatusOut(
+                check_id=check.id,
+                name=check.name,
+                group_id=check.group_id,
+                is_paused=check.is_paused,
+                last_checked_at=latest.checked_at if latest else None,
+                last_success=latest.success if latest else None,
+                last_response_time_ms=latest.response_time_ms if latest else None,
+                is_down=incident is not None,
+                current_incident_started_at=incident.started_at if incident else None,
+                current_downtime_seconds=(
+                    int((now - incident.started_at).total_seconds()) if incident else None
+                ),
+            )
+        )
+    return out
+
+
 @router.get("/{check_id}", response_model=CheckOut)
 async def get_check(check_id: int, db: AsyncSession = Depends(get_db)) -> Check:
     return await _get_or_404(db, check_id)
+
+
+@router.get("/{check_id}/history", response_model=CheckHistoryOut)
+async def check_history(
+    check_id: int,
+    range: Literal["day", "week", "month"] = "day",
+    db: AsyncSession = Depends(get_db),
+) -> CheckHistoryOut:
+    await _get_or_404(db, check_id)
+    now = dt.datetime.now(dt.timezone.utc)
+
+    if range == "day":
+        since = now - dt.timedelta(days=1)
+        rows = (
+            await db.execute(
+                select(CheckResult)
+                .where(CheckResult.check_id == check_id, CheckResult.checked_at >= since)
+                .order_by(CheckResult.checked_at)
+            )
+        ).scalars().all()
+        points = [
+            HistoryPoint(
+                bucket_start=r.checked_at,
+                avg_response_time_ms=float(r.response_time_ms) if r.response_time_ms is not None else None,
+                uptime_ratio=1.0 if r.success else 0.0,
+                sample_count=1,
+            )
+            for r in rows
+        ]
+        total = len(rows)
+        successes = sum(1 for r in rows if r.success)
+    else:
+        since = now - (dt.timedelta(weeks=1) if range == "week" else dt.timedelta(days=30))
+        bucket = "hour" if range == "week" else "day"
+        bucket_col = func.date_trunc(bucket, CheckResult.checked_at).label("bucket_start")
+        stmt = (
+            select(
+                bucket_col,
+                func.avg(CheckResult.response_time_ms).label("avg_response_time_ms"),
+                func.sum(cast(CheckResult.success, Integer)).label("successes"),
+                func.count().label("total"),
+            )
+            .where(CheckResult.check_id == check_id, CheckResult.checked_at >= since)
+            .group_by(bucket_col)
+            .order_by(bucket_col)
+        )
+        rows = (await db.execute(stmt)).all()
+        points = [
+            HistoryPoint(
+                bucket_start=r.bucket_start,
+                avg_response_time_ms=float(r.avg_response_time_ms) if r.avg_response_time_ms is not None else None,
+                uptime_ratio=(r.successes / r.total) if r.total else None,
+                sample_count=r.total,
+            )
+            for r in rows
+        ]
+        total = sum(r.total for r in rows)
+        successes = sum(r.successes for r in rows)
+
+    overall_uptime_ratio = (successes / total) if total else None
+    return CheckHistoryOut(range=range, points=points, overall_uptime_ratio=overall_uptime_ratio)
+
+
+@router.get("/{check_id}/incidents", response_model=list[IncidentOut])
+async def check_incidents(check_id: int, db: AsyncSession = Depends(get_db)) -> list[IncidentOut]:
+    await _get_or_404(db, check_id)
+    rows = (
+        await db.execute(
+            select(Incident)
+            .where(Incident.check_id == check_id)
+            .order_by(Incident.started_at.desc())
+            .limit(200)
+        )
+    ).scalars().all()
+    return [
+        IncidentOut(
+            id=i.id,
+            check_id=i.check_id,
+            started_at=i.started_at,
+            ended_at=i.ended_at,
+            duration_seconds=(
+                int((i.ended_at - i.started_at).total_seconds()) if i.ended_at is not None else None
+            ),
+        )
+        for i in rows
+    ]
 
 
 @router.patch("/{check_id}", response_model=CheckOut)

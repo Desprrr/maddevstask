@@ -54,3 +54,29 @@ class CheckOut(BaseModel):
     is_public: bool
     created_at: dt.datetime
     updated_at: dt.datetime
+
+
+class CheckStatusOut(BaseModel):
+    check_id: int
+    name: str
+    group_id: int | None
+    is_paused: bool
+    last_checked_at: dt.datetime | None
+    last_success: bool | None
+    last_response_time_ms: int | None
+    is_down: bool
+    current_incident_started_at: dt.datetime | None
+    current_downtime_seconds: int | None
+
+
+class HistoryPoint(BaseModel):
+    bucket_start: dt.datetime
+    avg_response_time_ms: float | None
+    uptime_ratio: float | None
+    sample_count: int
+
+
+class CheckHistoryOut(BaseModel):
+    range: str
+    points: list[HistoryPoint]
+    overall_uptime_ratio: float | None
