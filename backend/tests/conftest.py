@@ -1,3 +1,6 @@
+import asyncio
+
+import asyncpg
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -36,6 +39,32 @@ async def _setup_database():
         await conn.run_sync(Base.metadata.create_all)
     yield
     await test_engine.dispose()
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def _quiet_expected_cancellation_noise():
+    """С NullPool каждая операция открывает новое asyncpg-соединение; когда
+    тест разом отменяет много задач планировщика (test_scheduler_scale.py —
+    50 штук), часть из них попадает в отмену прямо во время установки
+    соединения. Сам asyncpg в этом случае иногда не успевает подхватить своё
+    же исключение назад в отменённую задачу — оно всплывает отдельным
+    "Future exception was never retrieved" в обработчике исключений event
+    loop'а. Тесты при этом проходят корректно (это не влияет на результат
+    ни одного assert) — просто убираем шум из вывода, а не прячем реальную
+    ошибку: любое другое исключение по-прежнему идёт в дефолтный handler."""
+    loop = asyncio.get_running_loop()
+    previous_handler = loop.get_exception_handler()
+
+    def handler(loop, context):
+        if isinstance(context.get("exception"), asyncpg.exceptions.ConnectionDoesNotExistError):
+            return
+        if previous_handler is not None:
+            previous_handler(loop, context)
+        else:
+            loop.default_exception_handler(context)
+
+    loop.set_exception_handler(handler)
+    yield
 
 
 @pytest_asyncio.fixture(autouse=True)
