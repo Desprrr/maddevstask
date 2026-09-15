@@ -1,0 +1,23 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "target-emulator",
+      "runtimeExecutable": "C:\\Users\\despr\\Desktop\\maddevs\\target-emulator\\.venv\\Scripts\\python.exe",
+      "runtimeArgs": ["-m", "uvicorn", "app:app", "--port", "9100", "--app-dir", "target-emulator"],
+      "port": 9100
+    },
+    {
+      "name": "backend",
+      "runtimeExecutable": "C:\\Users\\despr\\Desktop\\maddevs\\backend\\.venv\\Scripts\\python.exe",
+      "runtimeArgs": ["-m", "uvicorn", "app.main:app", "--port", "8000", "--app-dir", "backend"],
+      "port": 8000
+    },
+    {
+      "name": "frontend",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["--prefix", "frontend", "run", "dev", "--", "--port", "5173", "--strictPort"],
+      "port": 5173
+    }
+  ]
+}
