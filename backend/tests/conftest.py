@@ -6,8 +6,8 @@ from sqlalchemy.pool import NullPool
 from app.alerting.dispatcher import AlertDispatcher
 from app.alerting.email_sender import FakeEmailSender
 from app.db import Base, get_db
-from app.incidents import make_incident_evaluator
-from app.main import app
+from app.main import app, make_on_result
+from app.realtime.connection_manager import ConnectionManager
 from app.scheduler.engine import Scheduler
 
 TEST_DATABASE_URL = "postgresql+asyncpg://monitor:monitor@localhost:5432/monitor_test"
@@ -50,7 +50,10 @@ async def client():
     # Не запускаем настоящий app-lifespan (он поднял бы планировщик на проде,
     # ASGITransport и не вызывает lifespan сам по себе) — вместо этого явно
     # ставим планировщик, привязанный к тестовой БД, в app.state.
-    scheduler = Scheduler(TestSessionLocal, on_result=make_incident_evaluator(TestSessionLocal))
+    connection_manager = ConnectionManager()
+    app.state.connection_manager = connection_manager
+
+    scheduler = Scheduler(TestSessionLocal, on_result=make_on_result(connection_manager, TestSessionLocal))
     app.state.scheduler = scheduler
     await scheduler.start()
 
