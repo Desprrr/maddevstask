@@ -1,0 +1,62 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: monitor
+      POSTGRES_PASSWORD: monitor
+      POSTGRES_DB: monitor
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U monitor"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # Заглушка для писем: реальный SMTP-сервер только для локальной разработки,
+  # письма никуда не уходят за пределы docker-сети. Веб-инбокс на :8025.
+  mailpit:
+    image: axllent/mailpit:latest
+    ports:
+      - "8025:8025"
+      - "1025:1025"
+
+  # Эмулятор проверяемых сайтов — входит в задание, а не внешняя зависимость.
+  target-emulator:
+    build: ./target-emulator
+    ports:
+      - "9100:9100"
+
+  backend:
+    build: ./backend
+    environment:
+      DATABASE_URL: postgresql+asyncpg://monitor:monitor@postgres:5432/monitor
+      DATABASE_SSL: "false"
+      EMAIL_BACKEND: smtp
+      SMTP_HOST: mailpit
+      SMTP_PORT: "1025"
+      SMTP_FROM: monitor@example.com
+      CORS_ORIGINS: '["http://localhost:8080"]'
+      TARGET_EMULATOR_BASE_URL: http://target-emulator:9100
+      LOG_LEVEL: INFO
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mailpit:
+        condition: service_started
+      target-emulator:
+        condition: service_started
+    ports:
+      - "8000:8000"
+
+  frontend:
+    build: ./frontend
+    depends_on:
+      - backend
+    ports:
+      - "8080:80"
+
+volumes:
+  pgdata:
