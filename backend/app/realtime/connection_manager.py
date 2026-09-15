@@ -52,6 +52,15 @@ class ConnectionManager:
         if check.is_public:
             await self._broadcast(self._public, payload)
 
+    async def broadcast_admin_changed(self) -> None:
+        """Сигнал для админ-канала "что-то из состава/настроек изменилось,
+        обновись" — используется CRUD-эндпоинтами (создание/удаление/пауза
+        чека или группы, окна обслуживания), у которых нет естественного
+        события уровня пробы. Без деталей полезной нагрузки: фронтенд просто
+        перезапрашивает списки, это дешевле и надёжнее, чем воспроизводить
+        каждую мутацию по кусочкам на клиенте."""
+        await self._broadcast(self._admin, {"type": "admin.changed"})
+
     async def broadcast_incident_event(self, check: Check, event: IncidentEvent) -> None:
         payload = {
             "type": f"incident.{event.kind}",

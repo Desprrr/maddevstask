@@ -3,8 +3,10 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.api.deps import get_connection_manager
 from app.db import get_db
 from app.models.group import Group, GroupAlertEmail
+from app.realtime.connection_manager import ConnectionManager
 from app.schemas.group import GroupCreate, GroupOut, GroupUpdate
 
 router = APIRouter(prefix="/groups", tags=["groups"])
@@ -30,12 +32,17 @@ async def _get_or_404(db: AsyncSession, group_id: int) -> Group:
 
 
 @router.post("", response_model=GroupOut, status_code=201)
-async def create_group(payload: GroupCreate, db: AsyncSession = Depends(get_db)) -> GroupOut:
+async def create_group(
+    payload: GroupCreate,
+    db: AsyncSession = Depends(get_db),
+    connection_manager: ConnectionManager = Depends(get_connection_manager),
+) -> GroupOut:
     group = Group(name=payload.name)
     group.alert_emails = [GroupAlertEmail(email=str(e)) for e in payload.alert_emails]
     db.add(group)
     await db.commit()
     await db.refresh(group, attribute_names=["alert_emails"])
+    await connection_manager.broadcast_admin_changed()
     return _to_out(group)
 
 
@@ -52,7 +59,12 @@ async def get_group(group_id: int, db: AsyncSession = Depends(get_db)) -> GroupO
 
 
 @router.patch("/{group_id}", response_model=GroupOut)
-async def update_group(group_id: int, payload: GroupUpdate, db: AsyncSession = Depends(get_db)) -> GroupOut:
+async def update_group(
+    group_id: int,
+    payload: GroupUpdate,
+    db: AsyncSession = Depends(get_db),
+    connection_manager: ConnectionManager = Depends(get_connection_manager),
+) -> GroupOut:
     group = await _get_or_404(db, group_id)
 
     if payload.name is not None:
@@ -62,11 +74,17 @@ async def update_group(group_id: int, payload: GroupUpdate, db: AsyncSession = D
 
     await db.commit()
     await db.refresh(group, attribute_names=["alert_emails"])
+    await connection_manager.broadcast_admin_changed()
     return _to_out(group)
 
 
 @router.delete("/{group_id}", status_code=204)
-async def delete_group(group_id: int, db: AsyncSession = Depends(get_db)) -> None:
+async def delete_group(
+    group_id: int,
+    db: AsyncSession = Depends(get_db),
+    connection_manager: ConnectionManager = Depends(get_connection_manager),
+) -> None:
     group = await _get_or_404(db, group_id)
     await db.delete(group)
     await db.commit()
+    await connection_manager.broadcast_admin_changed()
