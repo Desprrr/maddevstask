@@ -14,7 +14,6 @@ def _to_out(group: Group) -> GroupOut:
     return GroupOut(
         id=group.id,
         name=group.name,
-        is_public=group.is_public,
         created_at=group.created_at,
         alert_emails=[e.email for e in group.alert_emails],
     )
@@ -32,7 +31,7 @@ async def _get_or_404(db: AsyncSession, group_id: int) -> Group:
 
 @router.post("", response_model=GroupOut, status_code=201)
 async def create_group(payload: GroupCreate, db: AsyncSession = Depends(get_db)) -> GroupOut:
-    group = Group(name=payload.name, is_public=payload.is_public)
+    group = Group(name=payload.name)
     group.alert_emails = [GroupAlertEmail(email=str(e)) for e in payload.alert_emails]
     db.add(group)
     await db.commit()
@@ -58,8 +57,6 @@ async def update_group(group_id: int, payload: GroupUpdate, db: AsyncSession = D
 
     if payload.name is not None:
         group.name = payload.name
-    if payload.is_public is not None:
-        group.is_public = payload.is_public
     if payload.alert_emails is not None:
         group.alert_emails = [GroupAlertEmail(email=str(e)) for e in payload.alert_emails]
 

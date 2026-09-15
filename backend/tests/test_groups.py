@@ -6,12 +6,11 @@ pytestmark = pytest.mark.asyncio
 async def test_create_and_get_group(client) -> None:
     response = await client.post(
         "/api/groups",
-        json={"name": "Prod", "is_public": True, "alert_emails": ["ops@example.com"]},
+        json={"name": "Prod", "alert_emails": ["ops@example.com"]},
     )
     assert response.status_code == 201
     body = response.json()
     assert body["name"] == "Prod"
-    assert body["is_public"] is True
     assert body["alert_emails"] == ["ops@example.com"]
 
     group_id = body["id"]

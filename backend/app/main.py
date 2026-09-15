@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.alerting.dispatcher import AlertDispatcher
 from app.alerting.email_sender import make_email_sender
-from app.api import checks, groups, maintenance_windows, ws
+from app.api import checks, groups, maintenance_windows, public, ws
 from app.config import get_settings
 from app.db import async_session_factory
 from app.incidents import make_incident_evaluator
@@ -68,6 +68,7 @@ app.add_middleware(
 app.include_router(groups.router, prefix="/api")
 app.include_router(checks.router, prefix="/api")
 app.include_router(maintenance_windows.router, prefix="/api")
+app.include_router(public.router, prefix="/api")
 app.include_router(ws.router)
 
 
