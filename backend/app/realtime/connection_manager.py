@@ -38,19 +38,26 @@ class ConnectionManager:
         self._public.discard(websocket)
 
     async def broadcast_check_result(self, check: Check, result: CheckResult) -> None:
-        payload = {
-            "type": "check.result",
-            "check_id": check.id,
-            "group_id": check.group_id,
-            "success": result.success,
-            "response_time_ms": result.response_time_ms,
-            "status_code": result.status_code,
-            "error": result.error,
-            "checked_at": result.checked_at.isoformat(),
-        }
-        await self._broadcast(self._admin, payload)
+        checked_at = result.checked_at.isoformat()
+        await self._broadcast(
+            self._admin,
+            {
+                "type": "check.result",
+                "check_id": check.id,
+                "group_id": check.group_id,
+                "success": result.success,
+                "response_time_ms": result.response_time_ms,
+                "status_code": result.status_code,
+                "error": result.error,
+                "checked_at": checked_at,
+            },
+        )
         if check.is_public:
-            await self._broadcast(self._public, payload)
+            # Не больше, чем отдаёт публичный REST: в error бывают внутренние хосты,
+            # код ответа и время — операционные детали, которые владелец не раскрывал.
+            await self._broadcast(
+                self._public, {"type": "check.result", "check_id": check.id, "checked_at": checked_at}
+            )
 
     async def broadcast_admin_changed(self) -> None:
         """Сигнал для админ-канала "что-то из состава/настроек изменилось,
@@ -61,18 +68,31 @@ class ConnectionManager:
         каждую мутацию по кусочкам на клиенте."""
         await self._broadcast(self._admin, {"type": "admin.changed"})
 
+    async def broadcast_public_changed(self) -> None:
+        """То же для публичной страницы: изменился состав или статус публичных
+        проверок (сделали публичной/приватной, удалили, пауза, переименовали группу).
+        Никаких деталей — страница сама перезапрашивает публичный REST."""
+        await self._broadcast(self._public, {"type": "public.changed"})
+
     async def broadcast_incident_event(self, check: Check, event: IncidentEvent) -> None:
-        payload = {
-            "type": f"incident.{event.kind}",
-            "check_id": check.id,
-            "group_id": check.group_id,
-            "incident_id": event.incident_id,
-            "started_at": event.started_at.isoformat(),
-            "ended_at": event.ended_at.isoformat() if event.ended_at else None,
-        }
-        await self._broadcast(self._admin, payload)
+        started_at = event.started_at.isoformat()
+        ended_at = event.ended_at.isoformat() if event.ended_at else None
+        await self._broadcast(
+            self._admin,
+            {
+                "type": f"incident.{event.kind}",
+                "check_id": check.id,
+                "group_id": check.group_id,
+                "incident_id": event.incident_id,
+                "started_at": started_at,
+                "ended_at": ended_at,
+            },
+        )
         if check.is_public:
-            await self._broadcast(self._public, payload)
+            await self._broadcast(
+                self._public,
+                {"type": f"incident.{event.kind}", "check_id": check.id, "started_at": started_at, "ended_at": ended_at},
+            )
 
     async def _broadcast(self, connections: set[WebSocket], payload: dict[str, Any]) -> None:
         dead: list[WebSocket] = []

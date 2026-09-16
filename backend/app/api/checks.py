@@ -44,6 +44,12 @@ async def _ensure_group_exists(db: AsyncSession, group_id: int | None) -> None:
         raise HTTPException(status_code=404, detail="Group not found")
 
 
+async def _announce_change(connection_manager: ConnectionManager, *, affects_public: bool) -> None:
+    await connection_manager.broadcast_admin_changed()
+    if affects_public:
+        await connection_manager.broadcast_public_changed()
+
+
 @router.post("", response_model=CheckOut, status_code=201)
 async def create_check(
     payload: CheckCreate,
@@ -58,7 +64,7 @@ async def create_check(
     await db.refresh(check)
     if not check.is_paused:
         scheduler.add(check)
-    await connection_manager.broadcast_admin_changed()
+    await _announce_change(connection_manager, affects_public=check.is_public)
     return check
 
 
@@ -214,6 +220,7 @@ async def update_check(
     connection_manager: ConnectionManager = Depends(get_connection_manager),
 ) -> Check:
     check = await _get_or_404(db, check_id)
+    was_public = check.is_public
     updates = payload.model_dump(exclude_unset=True)
 
     if "group_id" in updates:
@@ -227,7 +234,7 @@ async def update_check(
     # Перезапускаем задачу планировщика, чтобы новые interval/url/timeout
     # подхватились сразу, а не только со следующего случайного цикла.
     await scheduler.restart(check_id)
-    await connection_manager.broadcast_admin_changed()
+    await _announce_change(connection_manager, affects_public=was_public or check.is_public)
     return check
 
 
@@ -239,10 +246,11 @@ async def delete_check(
     connection_manager: ConnectionManager = Depends(get_connection_manager),
 ) -> None:
     check = await _get_or_404(db, check_id)
+    was_public = check.is_public
     await scheduler.remove(check_id)
     await db.delete(check)
     await db.commit()
-    await connection_manager.broadcast_admin_changed()
+    await _announce_change(connection_manager, affects_public=was_public)
 
 
 @router.post("/{check_id}/pause", response_model=CheckOut)
@@ -260,7 +268,7 @@ async def pause_check(
     await db.refresh(check)
     if closed is not None:
         await connection_manager.broadcast_incident_event(check, closed)
-    await connection_manager.broadcast_admin_changed()
+    await _announce_change(connection_manager, affects_public=check.is_public)
     return check
 
 
@@ -276,7 +284,7 @@ async def resume_check(
     await db.commit()
     await db.refresh(check)
     await scheduler.resume(check_id)
-    await connection_manager.broadcast_admin_changed()
+    await _announce_change(connection_manager, affects_public=check.is_public)
     return check
 
 

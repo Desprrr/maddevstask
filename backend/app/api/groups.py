@@ -5,6 +5,7 @@ from sqlalchemy.orm import selectinload
 
 from app.api.deps import get_connection_manager
 from app.db import get_db
+from app.models.check import Check
 from app.models.group import Group, GroupAlertEmail
 from app.realtime.connection_manager import ConnectionManager
 from app.schemas.group import GroupCreate, GroupOut, GroupUpdate
@@ -66,6 +67,7 @@ async def update_group(
     connection_manager: ConnectionManager = Depends(get_connection_manager),
 ) -> GroupOut:
     group = await _get_or_404(db, group_id)
+    renamed = payload.name is not None and payload.name != group.name
 
     if payload.name is not None:
         group.name = payload.name
@@ -75,6 +77,9 @@ async def update_group(
     await db.commit()
     await db.refresh(group, attribute_names=["alert_emails"])
     await connection_manager.broadcast_admin_changed()
+    # Адреса оповещений на публичной странице не видны, а имя группы — видно.
+    if renamed and await _has_public_checks(db, group_id):
+        await connection_manager.broadcast_public_changed()
     return _to_out(group)
 
 
@@ -85,6 +90,16 @@ async def delete_group(
     connection_manager: ConnectionManager = Depends(get_connection_manager),
 ) -> None:
     group = await _get_or_404(db, group_id)
+    had_public_checks = await _has_public_checks(db, group_id)  # после удаления их group_id станет NULL
     await db.delete(group)
     await db.commit()
     await connection_manager.broadcast_admin_changed()
+    if had_public_checks:
+        await connection_manager.broadcast_public_changed()
+
+
+async def _has_public_checks(db: AsyncSession, group_id: int) -> bool:
+    row = await db.execute(
+        select(Check.id).where(Check.group_id == group_id, Check.is_public.is_(True)).limit(1)
+    )
+    return row.first() is not None
