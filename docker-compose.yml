@@ -7,8 +7,12 @@ services:
       POSTGRES_DB: monitor
     volumes:
       - pgdata:/var/lib/postgresql/data
-    ports:
-      - "5432:5432"
+    # Порт на хост сознательно не публикуется: нужен только backend'у по
+    # внутренней docker-сети. Если нужен psql снаружи для отладки —
+    # `docker compose exec postgres psql -U monitor monitor`, без публикации
+    # порта; либо временно раскомментируйте и задайте POSTGRES_PORT в .env.
+    # ports:
+    #   - "${POSTGRES_PORT:-5432}:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U monitor"]
       interval: 5s
@@ -16,18 +20,18 @@ services:
       retries: 10
 
   # Заглушка для писем: реальный SMTP-сервер только для локальной разработки,
-  # письма никуда не уходят за пределы docker-сети. Веб-инбокс на :8025.
+  # письма никуда не уходят за пределы docker-сети. SMTP (1025) нужен только
+  # backend'у внутри сети — наружу публикуется только веб-инбокс.
   mailpit:
     image: axllent/mailpit:latest
     ports:
-      - "8025:8025"
-      - "1025:1025"
+      - "${MAILPIT_UI_PORT:-8025}:8025"
 
   # Эмулятор проверяемых сайтов — входит в задание, а не внешняя зависимость.
   target-emulator:
     build: ./target-emulator
     ports:
-      - "9100:9100"
+      - "${TARGET_EMULATOR_PORT:-9100}:9100"
 
   backend:
     build: ./backend
@@ -48,15 +52,18 @@ services:
         condition: service_started
       target-emulator:
         condition: service_started
+    # Порт настраивается через BACKEND_PORT (.env или переменная окружения) —
+    # 8000 у многих серверов уже занят другим сервисом, дефолт можно
+    # переопределить без правки этого файла.
     ports:
-      - "8000:8000"
+      - "${BACKEND_PORT:-8000}:8000"
 
   frontend:
     build: ./frontend
     depends_on:
       - backend
     ports:
-      - "8080:80"
+      - "${FRONTEND_PORT:-8080}:80"
 
 volumes:
   pgdata:
