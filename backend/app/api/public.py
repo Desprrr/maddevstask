@@ -75,13 +75,13 @@ async def public_status(db: AsyncSession = Depends(get_db)) -> PublicStatusOut:
     for group_id, group_checks in by_group.items():
         check_statuses = []
         for check in group_checks:
-            incident = open_incidents.get(check.id)
+            incident = None if check.is_paused else open_incidents.get(check.id)
             latest = latest_by_check.get(check.id)
             check_statuses.append(
                 PublicCheckStatus(
                     check_id=check.id,
                     name=check.name,
-                    status="down" if incident else "up",
+                    status="paused" if check.is_paused else ("down" if incident else "up"),
                     last_checked_at=latest.checked_at if latest else None,
                     current_downtime_seconds=(
                         int((now - incident.started_at).total_seconds()) if incident else None

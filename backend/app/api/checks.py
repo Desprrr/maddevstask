@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_connection_manager, get_scheduler
 from app.db import get_db
+from app.incidents import close_incident_for_pause
 from app.models.check import Check
 from app.models.check_result import CheckResult
 from app.models.group import Group
@@ -204,6 +205,7 @@ async def check_incidents(check_id: int, db: AsyncSession = Depends(get_db)) -> 
             duration_seconds=(
                 int((i.ended_at - i.started_at).total_seconds()) if i.ended_at is not None else None
             ),
+            end_reason=i.end_reason,
         )
         for i in rows
     ]
@@ -256,11 +258,14 @@ async def pause_check(
     scheduler: Scheduler = Depends(get_scheduler),
     connection_manager: ConnectionManager = Depends(get_connection_manager),
 ) -> Check:
+    await scheduler.remove(check_id)  # сначала остановить пробы, чтобы не прилетел результат после закрытия
     check = await _get_or_404(db, check_id)
     check.is_paused = True
+    closed = await close_incident_for_pause(db, check)
     await db.commit()
     await db.refresh(check)
-    await scheduler.remove(check_id)
+    if closed is not None:
+        await connection_manager.broadcast_incident_event(check, closed)
     await connection_manager.broadcast_admin_changed()
     return check
 

@@ -9,7 +9,7 @@ from pydantic import BaseModel
 class PublicCheckStatus(BaseModel):
     check_id: int
     name: str
-    status: Literal["up", "down"]
+    status: Literal["up", "down", "paused"]
     last_checked_at: dt.datetime | None
     current_downtime_seconds: int | None
     uptime_ratio_24h: float | None

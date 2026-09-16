@@ -20,7 +20,12 @@ async def _create_group(name: str) -> Group:
         return group
 
 
-async def _create_check(is_public: bool, group_id: int | None = None, name: str = "c") -> Check:
+async def _create_check(
+    is_public: bool, group_id: int | None = None, name: str = "c", is_paused: bool = False
+) -> Check:
+    # Активная, но создана прямо в БД после старта тестового планировщика — он
+    # её не подхватит, реальных проб не будет (на паузе она показывалась бы
+    # как "paused", а тесты здесь про up/down).
     async with TestSessionLocal() as db:
         check = Check(
             name=name,
@@ -29,7 +34,7 @@ async def _create_check(is_public: bool, group_id: int | None = None, name: str 
             interval_seconds=30,
             timeout_ms=5000,
             expected_status_code=200,
-            is_paused=True,
+            is_paused=is_paused,
             is_public=is_public,
         )
         db.add(check)

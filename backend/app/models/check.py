@@ -33,6 +33,10 @@ class Check(Base):
 
     is_paused: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     is_public: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    # Получателям отправлено DOWN, а RECOVERED ещё нет. Отделено от инцидентов:
+    # простой мониторинга может разрезать одно падение на два инцидента в журнале,
+    # но для получателей это всё ещё одно падение — одно DOWN и одно RECOVERED.
+    down_notified: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
 
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[dt.datetime] = mapped_column(

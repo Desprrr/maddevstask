@@ -9,10 +9,11 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.alerting.email_sender import EmailSender
-from app.maintenance import is_in_maintenance
+from app.maintenance import is_in_maintenance, maintenance_overlaps
 from app.models.check import Check
+from app.models.check_result import CheckResult
 from app.models.group import GroupAlertEmail
-from app.models.incident import Incident
+from app.models.incident import END_RECOVERED, Incident
 
 logger = logging.getLogger(__name__)
 
@@ -20,11 +21,20 @@ SWEEP_INTERVAL_SECONDS = 20
 
 
 class AlertDispatcher:
-    """Периодически сканирует инциденты, которым ещё не отправлено письмо
-    (down или recovered), и досылает его — если сейчас нет активного окна
-    обслуживания для этого чека/группы. Пока окно активно, инцидент просто
-    остаётся необработанным и будет подхвачен одним из следующих проходов —
-    в частности сразу после окончания окна, если падение всё ещё длится."""
+    """Периодический sweep писем. Письма описывают то, что думают получатели,
+    а не каждый инцидент журнала: `Check.down_notified` = "им сказано, что сайт
+    лежит". Отсюда три правила за проход:
+
+    1. Открытый инцидент, получатели ещё не в курсе, окна нет — DOWN.
+    2. Закрытый инцидент, о котором никто не узнал: если закрылся восстановлением
+       и не пересекался с окном обслуживания (просто быстро прошёл между sweep'ами)
+       — DOWN и RECOVERED парой; иначе (целиком внутри окна, прерван простоем
+       мониторинга или паузой) — пометить и молчать.
+    3. Получателям сказано "лежит", открытых инцидентов нет, последняя проба
+       успешна, окна нет — RECOVERED.
+
+    Поэтому простой мониторинга посреди падения даёт два инцидента в журнале, но
+    одно DOWN и одно RECOVERED; а падение внутри окна — ни одного письма."""
 
     def __init__(
         self,
@@ -59,49 +69,119 @@ class AlertDispatcher:
     async def run_once(self, now: dt.datetime | None = None) -> None:
         now = now or dt.datetime.now(dt.timezone.utc)
         async with self._session_factory() as db:
-            pending_down = (
-                await db.execute(select(Incident).where(Incident.alert_down_sent_at.is_(None)))
-            ).scalars().all()
-            for incident in pending_down:
-                await self._process(db, incident, kind="down", now=now)
+            await self._notify_new_outages(db, now)
+            await self._settle_unnotified_closed_incidents(db, now)
+            await self._notify_recoveries(db, now)
 
-            pending_recovered = (
-                await db.execute(
-                    select(Incident).where(
-                        Incident.ended_at.is_not(None), Incident.alert_recovered_sent_at.is_(None)
-                    )
-                )
-            ).scalars().all()
-            for incident in pending_recovered:
-                await self._process(db, incident, kind="recovered", now=now)
-
-    async def _process(self, db: AsyncSession, incident: Incident, kind: str, now: dt.datetime) -> None:
-        check = await db.get(Check, incident.check_id)
-        if check is None:
-            return
-        if await is_in_maintenance(db, check, now):
-            return
-
-        recipients: list[str] = []
-        if check.group_id is not None:
-            result = await db.execute(
-                select(GroupAlertEmail.email).where(GroupAlertEmail.group_id == check.group_id)
+    async def _notify_new_outages(self, db: AsyncSession, now: dt.datetime) -> None:
+        rows = await db.execute(
+            select(Incident, Check)
+            .join(Check, Check.id == Incident.check_id)
+            .where(
+                Incident.ended_at.is_(None),
+                Incident.alert_down_sent_at.is_(None),
+                Check.down_notified.is_(False),
             )
-            recipients = [row[0] for row in result.all()]
+            .order_by(Incident.started_at)
+        )
+        for incident, check in rows.all():
+            if await is_in_maintenance(db, check, now):
+                continue
+            await self._send(db, check, *_down_email(check, incident))
+            incident.alert_down_sent_at = now
+            check.down_notified = True
+            await db.commit()
 
-        if kind == "down":
-            subject = f"[DOWN] {check.name}"
-            body = f"{check.name} ({check.url}) не отвечает с {incident.started_at.isoformat()}."
-        else:
-            duration = incident.ended_at - incident.started_at  # type: ignore[operator]
-            subject = f"[RECOVERED] {check.name}"
-            body = f"{check.name} ({check.url}) снова доступен. Падение длилось {duration}."
+    async def _settle_unnotified_closed_incidents(self, db: AsyncSession, now: dt.datetime) -> None:
+        rows = await db.execute(
+            select(Incident, Check)
+            .join(Check, Check.id == Incident.check_id)
+            .where(
+                Incident.ended_at.is_not(None),
+                Incident.alert_down_sent_at.is_(None),
+                Incident.alert_recovered_sent_at.is_(None),
+                Incident.notifications_skipped.is_(False),
+                Check.down_notified.is_(False),
+            )
+            .order_by(Incident.started_at)
+        )
+        for incident, check in rows.all():
+            recovered = incident.end_reason in (None, END_RECOVERED)
+            if not recovered or await maintenance_overlaps(db, check, incident.started_at, incident.ended_at):
+                incident.notifications_skipped = True
+                await db.commit()
+                continue
+            if await is_in_maintenance(db, check, now):
+                continue
+            await self._send(db, check, *_down_email(check, incident))
+            await self._send(db, check, *_recovered_email(check, incident))
+            incident.alert_down_sent_at = now
+            incident.alert_recovered_sent_at = now
+            await db.commit()
 
-        for email in recipients:
+    async def _notify_recoveries(self, db: AsyncSession, now: dt.datetime) -> None:
+        checks = (await db.execute(select(Check).where(Check.down_notified.is_(True)))).scalars().all()
+        for check in checks:
+            still_open = (
+                await db.execute(
+                    select(Incident.id).where(Incident.check_id == check.id, Incident.ended_at.is_(None))
+                )
+            ).first()
+            if still_open is not None:
+                continue
+            latest_success = (
+                await db.execute(
+                    select(CheckResult.success)
+                    .where(CheckResult.check_id == check.id)
+                    .order_by(CheckResult.checked_at.desc())
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+            if not latest_success:  # проб нет или последняя — сбой (например, серия ещё не дотянула до порога)
+                continue
+            if await is_in_maintenance(db, check, now):
+                continue
+
+            last_incident = (
+                await db.execute(
+                    select(Incident)
+                    .where(Incident.check_id == check.id)
+                    .order_by(Incident.started_at.desc())
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+            await self._send(db, check, *_recovered_email(check, last_incident))
+            if last_incident is not None and last_incident.alert_recovered_sent_at is None:
+                last_incident.alert_recovered_sent_at = now
+            check.down_notified = False
+            await db.commit()
+
+    async def _send(self, db: AsyncSession, check: Check, subject: str, body: str) -> None:
+        if check.group_id is None:
+            return
+        result = await db.execute(
+            select(GroupAlertEmail.email).where(GroupAlertEmail.group_id == check.group_id)
+        )
+        for (email,) in result.all():
             await self._email_sender.send(to=email, subject=subject, body=body)
 
-        if kind == "down":
-            incident.alert_down_sent_at = now
+
+def _down_email(check: Check, incident: Incident) -> tuple[str, str]:
+    return (
+        f"[DOWN] {check.name}",
+        f"{check.name} ({check.url}) не отвечает с {incident.started_at.isoformat()}.",
+    )
+
+
+def _recovered_email(check: Check, incident: Incident | None) -> tuple[str, str]:
+    body = f"{check.name} ({check.url}) снова доступен."
+    if incident is not None and incident.ended_at is not None:
+        duration = incident.ended_at - incident.started_at
+        if incident.end_reason in (None, END_RECOVERED):
+            body += f" Падение длилось {duration}."
         else:
-            incident.alert_recovered_sent_at = now
-        await db.commit()
+            body += (
+                f" Наблюдаемое падение длилось {duration}; мониторинг прерывался, "
+                "поэтому точный момент восстановления неизвестен."
+            )
+    return f"[RECOVERED] {check.name}", body

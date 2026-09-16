@@ -11,3 +11,5 @@ class IncidentOut(BaseModel):
     started_at: dt.datetime
     ended_at: dt.datetime | None
     duration_seconds: int | None
+    # recovered | monitoring_gap | paused; None — ещё открыт
+    end_reason: str | None = None
