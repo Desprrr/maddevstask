@@ -10,6 +10,7 @@ from app.models.check import Check
 from app.models.check_result import CheckResult
 from app.models.group import Group
 from app.models.incident import Incident
+from app.queries import checks_with_latest_result
 from app.schemas.public import PublicCheckStatus, PublicGroupStatus, PublicStatusOut
 
 router = APIRouter(prefix="/public", tags=["public"])
@@ -22,9 +23,11 @@ async def public_status(db: AsyncSession = Depends(get_db)) -> PublicStatusOut:
     наблюдателю (имя, статус, аптайм), без URL/таймаутов/ожидаемых кодов —
     владелец не обязан раскрывать операционные детали."""
 
-    checks = list((await db.execute(select(Check).where(Check.is_public.is_(True)))).scalars().all())
-    if not checks:
+    rows = (await db.execute(checks_with_latest_result(Check.is_public.is_(True)))).all()
+    if not rows:
         return PublicStatusOut(groups=[])
+    checks = [check for check, _ in rows]
+    latest_by_check = {check.id: latest for check, latest in rows if latest is not None}
     check_ids = [c.id for c in checks]
 
     open_incidents = {
@@ -35,14 +38,6 @@ async def public_status(db: AsyncSession = Depends(get_db)) -> PublicStatusOut:
             )
         ).scalars().all()
     }
-
-    latest_stmt = (
-        select(CheckResult)
-        .where(CheckResult.check_id.in_(check_ids))
-        .distinct(CheckResult.check_id)
-        .order_by(CheckResult.check_id, CheckResult.checked_at.desc(), CheckResult.id.desc())
-    )
-    latest_by_check = {r.check_id: r for r in (await db.execute(latest_stmt)).scalars().all()}
 
     since = dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=24)
     uptime_stmt = (

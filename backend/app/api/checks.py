@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import get_connection_manager, get_scheduler
 from app.db import get_db
 from app.incidents import close_incident_for_pause
+from app.queries import checks_with_latest_result
 from app.models.check import Check
 from app.models.check_result import CheckResult
 from app.models.group import Group
@@ -76,19 +77,12 @@ async def list_checks(group_id: int | None = None, db: AsyncSession = Depends(ge
 # роутов имеет значение при совпадении формы пути.
 @router.get("/status", response_model=list[CheckStatusOut])
 async def list_checks_status(db: AsyncSession = Depends(get_db)) -> list[CheckStatusOut]:
-    checks = list((await db.execute(select(Check))).scalars().all())
+    rows = (await db.execute(checks_with_latest_result())).all()
+    checks = [check for check, _ in rows]
+    latest_by_check = {check.id: latest for check, latest in rows if latest is not None}
     check_ids = [c.id for c in checks]
     if not check_ids:
         return []
-
-    # DISTINCT ON — постгресовая фича, но проект и так рассчитан на Postgres.
-    latest_stmt = (
-        select(CheckResult)
-        .where(CheckResult.check_id.in_(check_ids))
-        .distinct(CheckResult.check_id)
-        .order_by(CheckResult.check_id, CheckResult.checked_at.desc(), CheckResult.id.desc())
-    )
-    latest_by_check = {r.check_id: r for r in (await db.execute(latest_stmt)).scalars().all()}
 
     open_incidents_stmt = select(Incident).where(
         Incident.check_id.in_(check_ids), Incident.ended_at.is_(None)
