@@ -2,7 +2,7 @@ import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import { api, type CheckCreatePayload, type CheckUpdatePayload } from '../api/http'
 import { connectRealtime } from '../api/ws'
-import type { Check, CheckStatus, RealtimeEvent } from '../types'
+import type { AdminRealtimeEvent, Check, CheckStatus } from '../types'
 import { useGroupsStore } from './groups'
 
 export const useChecksStore = defineStore('checks', () => {
@@ -10,6 +10,9 @@ export const useChecksStore = defineStore('checks', () => {
   const statuses = ref<Record<number, CheckStatus>>({})
   const loading = ref(false)
   const error = ref<string | null>(null)
+  /** Растёт при каждом admin.changed и каждом (пере)подключении WS. Страницы со своими
+   * данными (журнал инцидентов, окна обслуживания, история) следят за ним и перезапрашивают. */
+  const syncGeneration = ref(0)
 
   let disconnectRealtime: (() => void) | null = null
   let realtimeRefs = 0
@@ -72,13 +75,19 @@ export const useChecksStore = defineStore('checks', () => {
     return result
   }
 
-  function applyRealtimeEvent(event: RealtimeEvent) {
+  /** Перезапросить снимок целиком. Структурные изменения (создание/удаление/пауза чека
+   * или группы, окна обслуживания) не несут детальный payload — проще и надёжнее
+   * перезапросить списки, чем воспроизводить каждую мутацию. То же после переподключения:
+   * события, пришедшие пока WS не было, потеряны. */
+  function resync() {
+    syncGeneration.value += 1
+    void fetchAll()
+    void useGroupsStore().fetchAll()
+  }
+
+  function applyRealtimeEvent(event: AdminRealtimeEvent) {
     if (event.type === 'admin.changed') {
-      // Структурные изменения (создание/удаление/пауза чека или группы,
-      // окна обслуживания) не несут детальный payload — проще и надёжнее
-      // просто перезапросить списки, чем воспроизводить каждую мутацию.
-      void fetchAll()
-      void useGroupsStore().fetchAll()
+      resync()
       return
     }
 
@@ -115,7 +124,7 @@ export const useChecksStore = defineStore('checks', () => {
   function startRealtime() {
     realtimeRefs += 1
     if (!disconnectRealtime) {
-      disconnectRealtime = connectRealtime('admin', applyRealtimeEvent)
+      disconnectRealtime = connectRealtime('admin', applyRealtimeEvent, resync)
     }
   }
 
@@ -132,6 +141,7 @@ export const useChecksStore = defineStore('checks', () => {
     statuses,
     loading,
     error,
+    syncGeneration,
     fetchAll,
     refreshStatuses,
     create,

@@ -1,10 +1,21 @@
-import type { RealtimeEvent } from '../types'
+import type { AdminRealtimeEvent, PublicRealtimeEvent } from '../types'
+
+interface EventsByChannel {
+  admin: AdminRealtimeEvent
+  public: PublicRealtimeEvent
+}
 
 /** Открывает WS-соединение с автопереподключением (экспоненциальный backoff,
- * потолок 15с) и возвращает функцию отключения. */
-export function connectRealtime(
-  channel: 'admin' | 'public',
-  onEvent: (event: RealtimeEvent) => void,
+ * потолок 15с) и возвращает функцию отключения.
+ *
+ * `onOpen` вызывается при КАЖДОМ открытии, включая переподключения. Пока соединения
+ * не было (рестарт бэкенда, обрыв сети), события терялись — например,
+ * `incident.closed`, и статус залипал в "упал". Сервер не хранит пропущенные
+ * события, поэтому единственный надёжный способ — перезапросить снимок через REST. */
+export function connectRealtime<C extends keyof EventsByChannel>(
+  channel: C,
+  onEvent: (event: EventsByChannel[C]) => void,
+  onOpen?: () => void,
 ): () => void {
   let socket: WebSocket | null = null
   let closedByCaller = false
@@ -16,15 +27,18 @@ export function connectRealtime(
     socket = new WebSocket(`${protocol}://${location.host}/ws/${channel}`)
 
     socket.onmessage = (event) => {
+      let parsed: EventsByChannel[C]
       try {
-        onEvent(JSON.parse(event.data) as RealtimeEvent)
+        parsed = JSON.parse(event.data) as EventsByChannel[C]
       } catch {
-        // не-JSON/незнакомое сообщение — игнорируем
+        return // не-JSON сообщение — игнорируем
       }
+      onEvent(parsed)
     }
 
     socket.onopen = () => {
       retryDelay = 1000
+      onOpen?.()
     }
 
     socket.onclose = () => {

@@ -49,6 +49,8 @@ export interface Incident {
   started_at: string
   ended_at: string | null
   duration_seconds: number | null
+  /** recovered — сайт ответил; monitoring_gap — мониторинг прерывался; paused — проверку поставили на паузу */
+  end_reason: 'recovered' | 'monitoring_gap' | 'paused' | null
 }
 
 export type HistoryRange = 'day' | 'week' | 'month'
@@ -60,9 +62,18 @@ export interface HistoryPoint {
   sample_count: number
 }
 
+/** Интервал без результатов: мониторинг не работал или проверка была на паузе. */
+export interface MonitoringGap {
+  start: string
+  end: string
+}
+
 export interface CheckHistory {
   range: HistoryRange
+  range_start: string
+  range_end: string
   points: HistoryPoint[]
+  gaps: MonitoringGap[]
   overall_uptime_ratio: number | null
 }
 
@@ -78,7 +89,7 @@ export interface MaintenanceWindow {
 export interface PublicCheckStatus {
   check_id: number
   name: string
-  status: 'up' | 'down'
+  status: 'up' | 'down' | 'paused'
   last_checked_at: string | null
   current_downtime_seconds: number | null
   uptime_ratio_24h: number | null
@@ -119,4 +130,24 @@ export interface AdminChangedEvent {
   type: 'admin.changed'
 }
 
-export type RealtimeEvent = CheckResultEvent | IncidentWsEvent | AdminChangedEvent
+export type AdminRealtimeEvent = CheckResultEvent | IncidentWsEvent | AdminChangedEvent
+
+// Публичный канал отдаёт не больше, чем публичный REST: без ошибок, кодов ответа и групп.
+export interface PublicCheckResultEvent {
+  type: 'check.result'
+  check_id: number
+  checked_at: string
+}
+
+export interface PublicIncidentEvent {
+  type: 'incident.opened' | 'incident.closed'
+  check_id: number
+  started_at: string
+  ended_at: string | null
+}
+
+export interface PublicChangedEvent {
+  type: 'public.changed'
+}
+
+export type PublicRealtimeEvent = PublicCheckResultEvent | PublicIncidentEvent | PublicChangedEvent
