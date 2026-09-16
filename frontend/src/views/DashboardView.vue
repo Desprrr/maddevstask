@@ -178,7 +178,7 @@ function liveDowntime(check: Check): number | null {
         </thead>
         <tbody>
           <tr v-for="g in groupsStore.groups" :key="g.id">
-            <td>{{ g.name }}</td>
+            <td><RouterLink :to="`/groups/${g.id}`">{{ g.name }}</RouterLink></td>
             <td>
               <template v-if="editingGroupId === g.id">
                 <input v-model="editingEmails" placeholder="a@x.com, b@y.com" style="width: 16rem" />
@@ -224,7 +224,10 @@ function liveDowntime(check: Check): number | null {
 
     <section v-for="section in sections" :key="section.groupId ?? 'none'" class="card">
       <div class="card-header">
-        <h2>{{ section.name }}</h2>
+        <h2>
+          <RouterLink v-if="section.groupId !== null" :to="`/groups/${section.groupId}`">{{ section.name }}</RouterLink>
+          <template v-else>{{ section.name }}</template>
+        </h2>
         <StatusBadge v-if="section.checks.length" :status="groupStatus(section.checks)" />
       </div>
       <div v-if="section.checks.length" class="table-wrap">

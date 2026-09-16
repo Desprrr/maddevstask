@@ -9,14 +9,16 @@ import {
   Title,
   Tooltip,
 } from 'chart.js'
-import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { RouterLink, useRoute } from 'vue-router'
 import { Line } from 'vue-chartjs'
 import { api } from '../api/http'
+import MaintenanceWindows from '../components/MaintenanceWindows.vue'
 import StatusBadge from '../components/StatusBadge.vue'
 import { useNow } from '../composables/useNow'
 import { useChecksStore } from '../stores/checks'
-import type { CheckHistory, HistoryRange, Incident, MaintenanceWindow } from '../types'
+import { useGroupsStore } from '../stores/groups'
+import type { CheckHistory, HistoryRange, Incident } from '../types'
 import { formatDateTime, formatDuration, formatPercent, incidentEndLabel } from '../utils/format'
 import { buildHistorySeries, formatAxisTick, gapShadingPlugin } from '../utils/historyChart'
 
@@ -26,16 +28,17 @@ const route = useRoute()
 const checkId = computed(() => Number(route.params.id))
 
 const checksStore = useChecksStore()
+const groupsStore = useGroupsStore()
 const now = useNow()
 
 const history = ref<CheckHistory | null>(null)
 const incidents = ref<Incident[]>([])
-const windows = ref<MaintenanceWindow[]>([])
 const range = ref<HistoryRange>('day')
 const loadingHistory = ref(false)
 
 const check = computed(() => checksStore.checks.find((c) => c.id === checkId.value))
 const status = computed(() => checksStore.statuses[checkId.value])
+const group = computed(() => groupsStore.groups.find((g) => g.id === check.value?.group_id))
 
 const statusKind = computed<'up' | 'down' | 'paused'>(() => {
   if (check.value?.is_paused) return 'paused'
@@ -60,15 +63,11 @@ async function loadIncidents() {
   incidents.value = await api.checks.incidents(checkId.value)
 }
 
-async function loadWindows() {
-  windows.value = await api.maintenanceWindows.listForCheck(checkId.value)
-}
-
 watch(range, loadHistory)
 // admin.changed или переподключение WS: пока соединения не было, события могли потеряться
 watch(
   () => checksStore.syncGeneration,
-  () => Promise.all([loadHistory(), loadIncidents(), loadWindows()]),
+  () => Promise.all([loadHistory(), loadIncidents()]),
 )
 // инцидент открылся или закрылся — обновить журнал
 watch(
@@ -81,7 +80,7 @@ watch(
 onMounted(async () => {
   await checksStore.fetchAll()
   checksStore.startRealtime()
-  await Promise.all([loadHistory(), loadIncidents(), loadWindows()])
+  await Promise.all([loadHistory(), loadIncidents(), groupsStore.fetchAll()])
 })
 onUnmounted(() => checksStore.stopRealtime())
 
@@ -162,27 +161,6 @@ async function runNow() {
   }
 }
 
-// --- окна обслуживания ---
-const windowForm = reactive({ starts_at: '', ends_at: '', note: '' })
-
-async function createWindow() {
-  if (!windowForm.starts_at || !windowForm.ends_at) return
-  await api.maintenanceWindows.create({
-    check_id: checkId.value,
-    starts_at: new Date(windowForm.starts_at).toISOString(),
-    ends_at: new Date(windowForm.ends_at).toISOString(),
-    note: windowForm.note.trim() || null,
-  })
-  windowForm.starts_at = ''
-  windowForm.ends_at = ''
-  windowForm.note = ''
-  await loadWindows()
-}
-
-async function removeWindow(id: number) {
-  await api.maintenanceWindows.remove(id)
-  await loadWindows()
-}
 </script>
 
 <template>
@@ -264,32 +242,14 @@ async function removeWindow(id: number) {
 
       <section class="card">
         <h2>Окна обслуживания</h2>
-        <table v-if="windows.length">
-          <thead>
-            <tr>
-              <th>Начало</th>
-              <th>Конец</th>
-              <th>Заметка</th>
-              <th></th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="w in windows" :key="w.id">
-              <td>{{ formatDateTime(w.starts_at) }}</td>
-              <td>{{ formatDateTime(w.ends_at) }}</td>
-              <td>{{ w.note || '—' }}</td>
-              <td><button class="danger" @click="removeWindow(w.id)">Удалить</button></td>
-            </tr>
-          </tbody>
-        </table>
-        <p v-else class="muted">Окон обслуживания нет.</p>
-
-        <form class="inline-form" @submit.prevent="createWindow">
-          <label>Начало <input v-model="windowForm.starts_at" type="datetime-local" required /></label>
-          <label>Конец <input v-model="windowForm.ends_at" type="datetime-local" required /></label>
-          <input v-model="windowForm.note" placeholder="Заметка (опц.)" style="width: 14rem" />
-          <button type="submit" class="primary">Добавить окно</button>
-        </form>
+        <MaintenanceWindows :check-id="checkId" :reload-key="checksStore.syncGeneration" :now="now" />
+        <template v-if="group">
+          <h3>
+            Окна группы <RouterLink :to="`/groups/${group.id}`">{{ group.name }}</RouterLink>
+            <span class="muted">&nbsp;— тоже действуют на эту проверку</span>
+          </h3>
+          <MaintenanceWindows :group-id="group.id" :reload-key="checksStore.syncGeneration" :now="now" readonly />
+        </template>
       </section>
     </template>
     <p v-else class="muted">Загрузка…</p>
@@ -350,18 +310,8 @@ async function removeWindow(id: number) {
   color: var(--color-text-muted);
   font-size: 0.85rem;
 }
-.inline-form {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.5rem;
-  align-items: center;
-  margin-top: 0.75rem;
-}
-.inline-form label {
-  display: flex;
-  align-items: center;
-  gap: 0.3rem;
-  font-size: 0.85rem;
-  color: var(--color-text-muted);
+h3 {
+  margin: 1.25rem 0 0.5rem;
+  font-size: 0.95rem;
 }
 </style>
