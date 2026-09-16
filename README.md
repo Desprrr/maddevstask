@@ -31,80 +31,125 @@
 ### Поток данных: от пробы до письма и живого обновления
 
 ```
-Scheduler (один asyncio.Task на активный чек)
-   │  next run = момент завершения предыдущего + interval_seconds
-   │  (никогда не запускает пробу параллельно самой себе)
+Scheduler (scheduler/engine.py) — один asyncio.Task на каждый чек с is_paused=false
+   │  следующий запуск = завершение предыдущего + interval_seconds,
+   │  поэтому проба никогда не идёт параллельно самой себе;
+   │  run-now будит цикл через asyncio.Event, а не запускает вторую пробу
    ▼
-prober.probe(check)  ── общий httpx.AsyncClient на процесс ──▶ проверяемый сайт
-   │
+prober.probe(check) ── общий на процесс httpx.AsyncClient ──▶ проверяемый сайт
+   │  успех = код ответа совпал с expected_status_code
+   │          и (если задана) expected_body_substring есть в теле;
+   │  таймаут и сетевые ошибки → success=false, исключения наружу не летят
    ▼
 CheckResult записан в БД
    │
-   ├──▶ ConnectionManager.broadcast_check_result()  ──▶ /ws/admin (всегда)
-   │                                                 └─▶ /ws/public (если check.is_public)
-   │
+   ├──▶ ConnectionManager.broadcast_check_result()
+   │       /ws/admin  — полный результат (код, время ответа, текст ошибки, group_id)
+   │       /ws/public — только check_id и checked_at, и только если check.is_public
    ▼
-incidents.evaluate(check, result)   — 2 подряд неудачи открывают инцидент, первый успех закрывает;
-   │                                   решение всегда берётся из БД, не из памяти (restart-safe)
+incidents.make_incident_evaluator — решение по данным из БД, состояния в памяти нет:
+   │  • чек на паузе (ручной run-now) → инциденты не трогаются
+   │  • есть открытый инцидент, а от предыдущей пробы прошло больше
+   │    2×interval + timeout (мониторинг не работал) → закрыть на времени
+   │    предыдущей пробы, end_reason=monitoring_gap
+   │  • успех и есть открытый инцидент → закрыть, end_reason=recovered
+   │  • последние 2 пробы неудачны и между ними нет такого разрыва → открыть
+   │    инцидент со started_at первой из них
    ▼
-IncidentEvent (opened/closed) ──▶ ConnectionManager.broadcast_incident_event() ──▶ /ws/admin, /ws/public
-                                                        │
-                                                        ▼
-                                    AlertDispatcher (отдельный цикл, раз в 20с)
-                                    сканирует несквитанные инциденты, проверяет окна
-                                    обслуживания, шлёт письмо через EmailSender
+IncidentEvent (opened/closed) ──▶ ConnectionManager.broadcast_incident_event()
+                                     /ws/admin, /ws/public (урезанный, только публичные чеки)
+
+AlertDispatcher (alerting/dispatcher.py) — отдельный цикл, проход раз в 20с, работает по БД:
+   1. открытый инцидент, DOWN ещё не отправлен, Check.down_notified=false,
+      сейчас нет окна обслуживания → письмо DOWN, down_notified=true
+   2. закрытый инцидент, о котором писем не было: если закрыт восстановлением и
+      не пересекался с окном обслуживания → DOWN и RECOVERED парой (когда окна нет);
+      иначе → notifications_skipped=true, без писем
+   3. down_notified=true, открытых инцидентов нет, последняя проба успешна,
+      окна нет → RECOVERED, down_notified=false
+   письма уходят на адреса группы чека (у чека без группы адресатов нет)
+   через EmailSender; каждое письмо записывается в sent_emails
 ```
 
-CRUD-действия (создать/удалить/поставить на паузу чек или группу, окно обслуживания) идут
-отдельным путём: после мутации в БД рассылается лёгкий сигнал
-`ConnectionManager.broadcast_admin_changed()` (`{"type": "admin.changed"}`) на `/ws/admin` — фронтенд в ответ
-просто перезапрашивает списки, поэтому все открытые вкладки админки видят одно и то же не
-только по статусам, но и по составу чеков/групп.
+Окно обслуживания действует на чек, если оно задано на этот чек или на его группу
+(`maintenance.py`).
+
+**Пауза** (`POST /api/checks/{id}/pause`) снимает задачу чека с планировщика и закрывает открытый
+инцидент временем последней пробы (`end_reason=paused`). Затем рассылается `incident.closed`.
+
+**Структурные изменения** идут отдельным путём. Это создание, изменение, удаление, пауза и
+возобновление чека, создание, изменение и удаление группы, создание и удаление окна
+обслуживания. После мутации в БД на `/ws/admin` уходит сигнал без данных
+`{"type": "admin.changed"}`, и админка перезапрашивает списки. Если изменение видно на
+публичной странице, дополнительно на `/ws/public` уходит `{"type": "public.changed"}`:
+- чек был или стал публичным;
+- переименована или удалена группа, в которой есть публичные чеки.
+
+Публичная страница в ответ перезапрашивает `GET /api/public/status`.
 
 ### Backend (`backend/app/`)
 
 | Модуль | Отвечает за |
 |---|---|
+| `main.py` | Сборка приложения: в `lifespan` создаёт `ConnectionManager`, запускает `Scheduler` (с колбэком: WS-рассылка результата → оценка инцидента → WS-рассылка события) и `AlertDispatcher`; CORS; роутеры; `GET /health` |
+| `config.py` | Настройки из окружения / `.env`: `DATABASE_URL`, `DATABASE_SSL`, `EMAIL_BACKEND`, `SMTP_*`, `CORS_ORIGINS`, `LOG_LEVEL` |
+| `db.py` | Async engine (пул 20 + 20 overflow), фабрика сессий, `get_db` |
 | `models/` | SQLAlchemy ORM: `Group`, `GroupAlertEmail`, `Check`, `CheckResult`, `Incident`, `MaintenanceWindow`, `SentEmail` |
-| `schemas/` | Pydantic-модели запросов/ответов API |
-| `api/checks.py` | CRUD чеков, pause/resume/run-now, `/status` (панель), `/history` (агрегация), `/incidents` (журнал) |
+| `schemas/` | Pydantic-модели запросов и ответов API |
+| `api/checks.py` | CRUD чеков, `pause`/`resume`/`run-now`, `GET /checks/status` (панель статусов), `/{id}/history` (сутки — сырые пробы, неделя/месяц — агрегация по часу/дню, разрывы мониторинга), `/{id}/incidents` (журнал, последние 200, с `end_reason`) |
 | `api/groups.py` | CRUD групп и их адресов оповещений |
-| `api/maintenance_windows.py` | CRUD окон обслуживания |
-| `api/public.py` | `GET /public/status` — курированный снапшот для публичной страницы |
+| `api/maintenance_windows.py` | Создание, список (по `check_id` или `group_id`), удаление окон обслуживания |
+| `api/public.py` | `GET /public/status` — только чеки с `is_public`: имя, статус `up`/`down`/`paused`, текущая длительность падения, аптайм за 24ч, сгруппированно; группа `down`, если упал хотя бы один её публичный чек |
 | `api/ws.py` | WebSocket-эндпоинты `/ws/admin`, `/ws/public` |
-| `scheduler/engine.py` | `Scheduler` — по одной asyncio-задаче на активный чек, `run-now`, гарантия отсутствия параллельного запуска самого себя |
-| `scheduler/prober.py` | Одна HTTP-проба; общий `httpx.AsyncClient` на процесс (пул соединений — важно под нагрузку многих чеков) |
-| `incidents.py` | Открытие/закрытие инцидентов по порогу подряд-неудач; вся история берётся из БД, ничего не хранит в памяти |
-| `alerting/email_sender.py` | Абстракция `EmailSender`: `FakeEmailSender` (только outbox в БД) / `SmtpEmailSender` (реальный SMTP) |
-| `alerting/dispatcher.py` | Периодический sweep: кому ещё не отправлено письмо, не идёт ли сейчас окно обслуживания |
-| `realtime/connection_manager.py` | Пулы WS-подключений admin/public, рассылка событий |
-| `db.py`, `config.py` | Async engine/session factory, настройки из окружения |
-| `seed.py` | Идемпотентные демо-данные на `target-emulator` |
+| `api/deps.py` | Зависимости: `Scheduler` и `ConnectionManager` из `app.state` |
+| `scheduler/engine.py` | `Scheduler`: задача на чек, `add`/`remove`/`resume`/`restart` (после PATCH чека), `trigger_now`: у запланированного чека будит цикл и ждёт результат, у чека на паузе делает разовую пробу под локом |
+| `scheduler/prober.py` | Одна HTTP-проба; общий `httpx.AsyncClient` на процесс |
+| `incidents.py` | Открытие и закрытие инцидентов (порог 2, разрыв мониторинга, пауза); порог разрыва `monitoring_gap_threshold` |
+| `maintenance.py` | Пересекается ли интервал или момент с окном обслуживания чека или его группы |
+| `queries.py` | `checks_with_latest_result` — чеки с последним результатом через `LATERAL ... LIMIT 1`; `monitoring_gaps` — интервалы без результатов дольше порога (через `lag()`), включая начало периода и отрезок до "сейчас" |
+| `alerting/dispatcher.py` | Периодический проход рассылки писем DOWN/RECOVERED по трём правилам выше |
+| `alerting/email_sender.py` | `EmailSender`: `FakeEmailSender` (лог + запись в `sent_emails`) / `SmtpEmailSender` (aiosmtplib + запись в `sent_emails`), выбор по `EMAIL_BACKEND` |
+| `realtime/connection_manager.py` | Пулы WS-подключений admin/public; рассылка `check.result`, `incident.opened`/`incident.closed`, `admin.changed`, `public.changed` (в публичный канал — урезанные данные) |
+| `seed.py` | Демо-данные на `target-emulator`; ничего не делает, если в БД уже есть хоть одна группа |
 | `alembic/` | Миграции схемы БД |
 
 ### Frontend (`frontend/src/`)
 
 | Модуль | Отвечает за |
 |---|---|
+| `main.ts`, `App.vue`, `router/index.ts` | Точка входа (Pinia + роутер); маршруты `/`, `/groups/:id`, `/checks/:id`, `/status` |
+| `types.ts` | Типы ответов API и WS-событий (админские и публичные события — отдельные типы) |
 | `api/http.ts` | Типизированный REST-клиент (относительные пути `/api/...`) |
-| `api/ws.ts` | WebSocket-клиент с автопереподключением (экспоненциальный backoff); после каждого (пере)подключения подписчик перезапрашивает снимок — события за время обрыва не теряются |
-| `stores/checks.ts`, `stores/groups.ts` | Pinia: состояние админки + применение live-событий с сервера |
-| `stores/publicStatus.ts` | Состояние публичной страницы: снимок, live-события, `public.changed` |
-| `views/DashboardView.vue` | Админка: CRUD групп/чеков, живая панель статусов |
-| `views/CheckDetailView.vue` | График истории (ось времени, простои мониторинга затенены), журнал инцидентов, окна обслуживания чека и его группы |
-| `views/GroupDetailView.vue` | Страница группы: её проверки и окна обслуживания на всю группу |
+| `api/ws.ts` | `connectRealtime(channel, onEvent, onOpen)`: WS с автопереподключением (backoff 1с → 15с); `onOpen` вызывается при каждом открытии, включая переподключения |
+| `stores/checks.ts` | Pinia: чеки и статусы, применение `check.result`/`incident.*`; на `admin.changed` и на каждое (пере)подключение WS — `resync()`: перезапрос чеков, статусов и групп и рост `syncGeneration`; одно WS-соединение на все компоненты (счётчик подписчиков) |
+| `stores/groups.ts` | Pinia: группы и их CRUD |
+| `stores/publicStatus.ts` | Состояние публичной страницы: снимок `/api/public/status`, применение публичных событий, перезапрос на `public.changed` и при (пере)подключении WS |
+| `views/DashboardView.vue` | Админка: группы (создание, адреса, удаление), добавление чека, чеки по группам со статусом, пауза/возобновление, run-now, удаление |
+| `views/CheckDetailView.vue` | Страница чека: график истории (сутки/неделя/месяц), журнал инцидентов, окна обслуживания чека и (только чтение) его группы; перезапрос по `syncGeneration` |
+| `views/GroupDetailView.vue` | Страница группы: её чеки со статусом и окна обслуживания группы |
 | `views/PublicStatusView.vue` | Публичная страница статуса (без входа) |
-| `components/MaintenanceWindows.vue` | Список/создание/удаление окон обслуживания — для чека или группы |
-| `utils/historyChart.ts` | Точки графика истории: разрывы линии и затенение простоев мониторинга |
-| `composables/useNow.ts` | Тикающие "часы" для живого отображения длительности падения |
+| `components/MaintenanceWindows.vue` | Список, создание (с проверкой "конец позже начала") и удаление окон обслуживания для чека или группы; режим только для чтения |
+| `components/StatusBadge.vue` | Бейдж `up`/`down`/`paused` |
+| `utils/historyChart.ts` | Точки графика по оси времени: разрыв линии в интервалах без данных, плагин затенения этих интервалов |
+| `utils/format.ts` | Форматирование дат, длительностей, процентов, причины закрытия инцидента |
+| `composables/useNow.ts` | Тикающие "часы" для живой длительности падения |
+
+В docker-compose фронтенд отдаёт nginx (`frontend/nginx.conf`), он же проксирует `/api/` и `/ws/` на
+`backend:8000`. В разработке это делает dev-сервер Vite (`frontend/vite.config.ts`).
 
 ### Хранилище
 
-7 таблиц (см. `backend/alembic/versions/` для точной схемы): `groups` + `group_alert_emails`
-(группы и адреса оповещений), `checks` (сами проверки), `check_results` (сырая история проб,
-индекс `(check_id, checked_at)` под быструю агрегацию), `incidents` (журнал падений),
-`maintenance_windows` (окна обслуживания на чек или группу), `sent_emails` (outbox — доказательство
-отправки писем независимо от backend'а).
+7 таблиц, точная схема — в `backend/alembic/versions/`:
+
+| Таблица | Что хранит |
+|---|---|
+| `groups` | Группы |
+| `group_alert_emails` | Адреса оповещений групп |
+| `checks` | Проверки: `interval_seconds` от 30 до 3600 (CHECK-ограничение), флаги `is_paused`, `is_public`, `down_notified` (получателям отправлено DOWN, а RECOVERED ещё нет) |
+| `check_results` | Сырая история проб, индекс `(check_id, checked_at)` |
+| `incidents` | Журнал падений, индекс `(check_id, started_at)`: `started_at`/`ended_at`, `end_reason` (`recovered`/`monitoring_gap`/`paused`), отметки отправки писем, `notifications_skipped` |
+| `maintenance_windows` | Окна обслуживания; ровно одно из `check_id`/`group_id` (CHECK-ограничение) |
+| `sent_emails` | Outbox всех отправленных писем с указанием backend'а (`fake`/`smtp`) |
 
 ## Структура репозитория
 
