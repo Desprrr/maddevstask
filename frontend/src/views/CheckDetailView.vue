@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import {
-  CategoryScale,
   Chart as ChartJS,
+  type ChartOptions,
   Legend,
   LinearScale,
   LineElement,
@@ -17,9 +17,10 @@ import StatusBadge from '../components/StatusBadge.vue'
 import { useNow } from '../composables/useNow'
 import { useChecksStore } from '../stores/checks'
 import type { CheckHistory, HistoryRange, Incident, MaintenanceWindow } from '../types'
-import { formatDateTime, formatDuration, formatPercent } from '../utils/format'
+import { formatDateTime, formatDuration, formatPercent, incidentEndLabel } from '../utils/format'
+import { buildHistorySeries, formatAxisTick, gapShadingPlugin } from '../utils/historyChart'
 
-ChartJS.register(LineElement, PointElement, LinearScale, CategoryScale, Tooltip, Legend, Title)
+ChartJS.register(LineElement, PointElement, LinearScale, Tooltip, Legend, Title)
 
 const route = useRoute()
 const checkId = computed(() => Number(route.params.id))
@@ -64,6 +65,18 @@ async function loadWindows() {
 }
 
 watch(range, loadHistory)
+// admin.changed или переподключение WS: пока соединения не было, события могли потеряться
+watch(
+  () => checksStore.syncGeneration,
+  () => Promise.all([loadHistory(), loadIncidents(), loadWindows()]),
+)
+// инцидент открылся или закрылся — обновить журнал
+watch(
+  () => status.value?.is_down,
+  (isDown, wasDown) => {
+    if (wasDown !== undefined && isDown !== wasDown) void loadIncidents()
+  },
+)
 
 onMounted(async () => {
   await checksStore.fetchAll()
@@ -72,26 +85,65 @@ onMounted(async () => {
 })
 onUnmounted(() => checksStore.stopRealtime())
 
+const series = computed(() => (history.value ? buildHistorySeries(history.value) : null))
+
 const chartData = computed(() => ({
-  labels: history.value?.points.map((p) => new Date(p.bucket_start).toLocaleString()) ?? [],
   datasets: [
     {
       label: 'Время ответа (мс)',
-      data: history.value?.points.map((p) => p.avg_response_time_ms) ?? [],
+      data: series.value?.responseTime ?? [],
       borderColor: '#2563eb',
       backgroundColor: 'rgba(37,99,235,0.15)',
+      yAxisID: 'y',
+      pointRadius: range.value === 'day' ? 0 : 2,
       tension: 0.2,
+    },
+    {
+      label: 'Доступность (%)',
+      data: series.value?.uptimePercent ?? [],
+      borderColor: '#dc2626',
+      backgroundColor: 'rgba(220,38,38,0.15)',
+      yAxisID: 'uptime',
+      pointRadius: 0,
+      stepped: true,
     },
   ],
 }))
 
-const chartOptions = {
+const shading = gapShadingPlugin(() => series.value?.gaps ?? [])
+
+const chartOptions = computed<ChartOptions<'line'>>(() => ({
   responsive: true,
   maintainAspectRatio: false,
+  animation: false,
+  parsing: false,
+  interaction: { mode: 'nearest', axis: 'x', intersect: false },
   scales: {
+    x: {
+      type: 'linear',
+      min: series.value?.min,
+      max: series.value?.max,
+      ticks: { maxTicksLimit: 8, callback: (value) => formatAxisTick(range.value, Number(value)) },
+    },
     y: { beginAtZero: true, title: { display: true, text: 'мс' } },
+    uptime: {
+      position: 'right',
+      min: 0,
+      max: 100,
+      grid: { drawOnChartArea: false },
+      title: { display: true, text: '%' },
+    },
   },
-}
+  plugins: {
+    tooltip: {
+      callbacks: { title: (items) => new Date(items[0]?.parsed.x ?? 0).toLocaleString() },
+    },
+  },
+}))
+
+const gapsTotalSeconds = computed(
+  () => (series.value?.gaps ?? []).reduce((sum, g) => sum + (g.end - g.start), 0) / 1000,
+)
 
 async function togglePause() {
   if (!check.value) return
@@ -167,9 +219,20 @@ async function removeWindow(id: number) {
             <button :class="{ primary: range === 'month' }" @click="range = 'month'">Месяц</button>
           </div>
         </div>
-        <p class="muted">Доступность за период: {{ formatPercent(history?.overall_uptime_ratio) }}</p>
+        <p class="muted">
+          Доступность за период: {{ formatPercent(history?.overall_uptime_ratio) }}
+          <template v-if="series?.gaps.length">
+            · <span class="gap-swatch"></span> мониторинг не работал {{ series.gaps.length }} раз(а), всего
+            {{ formatDuration(gapsTotalSeconds) }} — эти интервалы не считаются ни работой, ни падением
+          </template>
+        </p>
         <div class="chart-wrap">
-          <Line v-if="history && history.points.length" :data="chartData" :options="chartOptions" />
+          <Line
+            v-if="history && history.points.length"
+            :data="chartData"
+            :options="chartOptions"
+            :plugins="[shading]"
+          />
           <p v-else class="muted">Пока нет данных за этот период.</p>
         </div>
       </section>
@@ -182,6 +245,7 @@ async function removeWindow(id: number) {
               <th>Начало</th>
               <th>Конец</th>
               <th>Длительность</th>
+              <th>Чем закончился</th>
             </tr>
           </thead>
           <tbody>
@@ -189,6 +253,9 @@ async function removeWindow(id: number) {
               <td>{{ formatDateTime(incident.started_at) }}</td>
               <td>{{ incident.ended_at ? formatDateTime(incident.ended_at) : 'сейчас' }}</td>
               <td>{{ incident.duration_seconds !== null ? formatDuration(incident.duration_seconds) : '—' }}</td>
+              <td :class="{ muted: incident.end_reason && incident.end_reason !== 'recovered' }">
+                {{ incidentEndLabel(incident) }}
+              </td>
             </tr>
           </tbody>
         </table>
@@ -270,6 +337,14 @@ async function removeWindow(id: number) {
 }
 .chart-wrap {
   height: 280px;
+}
+.gap-swatch {
+  display: inline-block;
+  width: 0.8rem;
+  height: 0.8rem;
+  vertical-align: middle;
+  background: rgba(148, 163, 184, 0.45);
+  border-radius: 2px;
 }
 .muted {
   color: var(--color-text-muted);

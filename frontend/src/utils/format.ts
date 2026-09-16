@@ -1,3 +1,5 @@
+import type { Incident } from '../types'
+
 export function formatDateTime(iso: string | null | undefined): string {
   if (!iso) return '—'
   return new Date(iso).toLocaleString()
@@ -22,4 +24,11 @@ export function formatPercent(ratio: number | null | undefined): string {
 export function formatMs(ms: number | null | undefined): string {
   if (ms === null || ms === undefined) return '—'
   return `${Math.round(ms)} мс`
+}
+
+export function incidentEndLabel(incident: Pick<Incident, 'ended_at' | 'end_reason'>): string {
+  if (incident.ended_at === null) return 'идёт сейчас'
+  if (incident.end_reason === 'monitoring_gap') return 'мониторинг прерывался — исход неизвестен'
+  if (incident.end_reason === 'paused') return 'проверку поставили на паузу'
+  return 'сайт восстановился'
 }
