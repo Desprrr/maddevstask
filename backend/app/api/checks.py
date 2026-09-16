@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import get_connection_manager, get_scheduler
 from app.db import get_db
 from app.incidents import close_incident_for_pause
-from app.queries import checks_with_latest_result
+from app.queries import checks_with_latest_result, monitoring_gaps
 from app.models.check import Check
 from app.models.check_result import CheckResult
 from app.models.group import Group
@@ -22,6 +22,7 @@ from app.schemas.check import (
     CheckStatusOut,
     CheckUpdate,
     HistoryPoint,
+    MonitoringGap,
 )
 from app.schemas.incident import IncidentOut
 from app.scheduler.engine import Scheduler
@@ -130,7 +131,7 @@ async def check_history(
     range: Literal["day", "week", "month"] = "day",
     db: AsyncSession = Depends(get_db),
 ) -> CheckHistoryOut:
-    await _get_or_404(db, check_id)
+    check = await _get_or_404(db, check_id)
     now = dt.datetime.now(dt.timezone.utc)
 
     if range == "day":
@@ -182,7 +183,15 @@ async def check_history(
         successes = sum(r.successes for r in rows)
 
     overall_uptime_ratio = (successes / total) if total else None
-    return CheckHistoryOut(range=range, points=points, overall_uptime_ratio=overall_uptime_ratio)
+    gaps = [MonitoringGap(start=start, end=end) for start, end in await monitoring_gaps(db, check, since, now)]
+    return CheckHistoryOut(
+        range=range,
+        range_start=since,
+        range_end=now,
+        points=points,
+        gaps=gaps,
+        overall_uptime_ratio=overall_uptime_ratio,
+    )
 
 
 @router.get("/{check_id}/incidents", response_model=list[IncidentOut])

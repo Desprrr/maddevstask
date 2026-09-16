@@ -76,7 +76,17 @@ class HistoryPoint(BaseModel):
     sample_count: int
 
 
+class MonitoringGap(BaseModel):
+    """Интервал без результатов: мониторинг не работал или проверка была на паузе."""
+
+    start: dt.datetime
+    end: dt.datetime
+
+
 class CheckHistoryOut(BaseModel):
     range: str
+    range_start: dt.datetime
+    range_end: dt.datetime
     points: list[HistoryPoint]
+    gaps: list[MonitoringGap]
     overall_uptime_ratio: float | None
